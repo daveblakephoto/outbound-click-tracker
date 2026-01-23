@@ -11,16 +11,19 @@ describe("scheduled rollup (daily -> monthly)", () => {
   let mf: Miniflare;
   let CLICKS: any;
   let ARCHIVE: any;
+  let SNAPSHOTS: any;
   const cronNow = "2026-02-15T12:00:00.000Z";
 
   beforeEach(async () => {
     mf = new Miniflare({
       modules: true,
       script: "export default { fetch() { return new Response('ok'); } }",
-      kvNamespaces: ["CLICKS", "CLICKS_ARCHIVE"]
+      kvNamespaces: ["CLICKS", "CLICKS_ARCHIVE"],
+      r2Buckets: ["CLICKS_SNAPSHOTS"]
     });
     CLICKS = await mf.getKVNamespace("CLICKS");
     ARCHIVE = await mf.getKVNamespace("CLICKS_ARCHIVE");
+    SNAPSHOTS = await mf.getR2Bucket("CLICKS_SNAPSHOTS");
   });
 
   afterEach(async () => {
@@ -144,6 +147,29 @@ describe("scheduled rollup (daily -> monthly)", () => {
 
     expect(await ARCHIVE.get("vendor-g:website:2025-10-03")).toBe("8");
     expect(await CLICKS.get("vendor-g:website:2025-10-03")).toBeNull();
+  });
+
+  test("writes monthly CSV snapshots to R2 when enabled", async () => {
+    await CLICKS.put("vendor-h:website:2025-10-04", "5");
+    await CLICKS.put("vendor-h:instagram:2025-10-05", "2");
+
+    const env = {
+      CLICKS,
+      CLICKS_ARCHIVE: ARCHIVE,
+      CLICKS_SNAPSHOTS: SNAPSHOTS,
+      CRON_NOW: cronNow
+    } as any;
+
+    await worker.scheduled({} as any, env);
+
+    const listed = await SNAPSHOTS.list({ prefix: "snapshots/2025-10/" });
+    expect(listed.objects.length).toBe(1);
+
+    const object = await SNAPSHOTS.get(listed.objects[0].key);
+    const csv = await object.text();
+    expect(csv).toContain("vendor,type,date,count");
+    expect(csv).toContain("vendor-h,website,2025-10-04,5");
+    expect(csv).toContain("vendor-h,instagram,2025-10-05,2");
   });
 
   test("skips rollup when a lock is present", async () => {

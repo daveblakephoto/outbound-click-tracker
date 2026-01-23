@@ -258,6 +258,8 @@ export default {
       expirationTtl: 600
     });
 
+    const snapshotRowsByMonth = new Map();
+
     let cursor;
     try {
       do {
@@ -278,6 +280,14 @@ export default {
             if (env.CLICKS_ARCHIVE) {
               await env.CLICKS_ARCHIVE.put(key.name, String(value));
             }
+            if (env.CLICKS_SNAPSHOTS) {
+              if (!snapshotRowsByMonth.has(month)) {
+                snapshotRowsByMonth.set(month, []);
+              }
+              snapshotRowsByMonth.get(month).push(
+                `${vendor},${type},${date},${value}`
+              );
+            }
             const existing =
               parseInt(await env.CLICKS.get(monthlyKey)) || 0;
 
@@ -292,6 +302,19 @@ export default {
 
         cursor = list.cursor;
       } while (cursor);
+
+      if (env.CLICKS_SNAPSHOTS) {
+        const timestamp = now.toISOString().replace(/[:.]/g, "-");
+        for (const [month, rows] of snapshotRowsByMonth.entries()) {
+          const header = "vendor,type,date,count\n";
+          const body = rows.join("\n");
+          const csv = `${header}${body}\n`;
+          await env.CLICKS_SNAPSHOTS.put(
+            `snapshots/${month}/${timestamp}.csv`,
+            csv
+          );
+        }
+      }
     } finally {
       await env.CLICKS.delete(lockKey);
     }
