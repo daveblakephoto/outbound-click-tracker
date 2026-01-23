@@ -1,0 +1,10 @@
+name = "smle-click-tracker"
+main = "src/worker.ts"
+compatibility_date = "2026-01-23"
+
+kv_namespaces = [
+  { binding = "CLICKS", id = "103b765eda8a4faba6bf0ac2986874c6" }
+]
+
+[triggers]
+crons = ["0 3 * * *"]
