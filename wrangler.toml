@@ -7,8 +7,8 @@ kv_namespaces = [
   { binding = "CLICKS_ARCHIVE", id = "00000000000000000000000000000000" }
 ]
 
-[r2_buckets]
-binding = "CLICKS_SNAPSHOTS"
-bucket_name = "click-snapshots"
+r2_buckets = [
+  { binding = "CLICKS_SNAPSHOTS", bucket_name = "click-snapshots" }
+]
 [triggers]
 crons = ["0 3 * * *"]

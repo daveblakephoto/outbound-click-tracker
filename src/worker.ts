@@ -241,6 +241,7 @@ export default {
      ---------------------------- */
   async scheduled(event, env) {
     const now = env.CRON_NOW ? new Date(env.CRON_NOW) : new Date();
+    console.log("cron:start", now.toISOString());
     const cutoffDate = (() => {
       const year = now.getUTCFullYear();
       const monthIndex = now.getUTCMonth() - 2;
@@ -304,13 +305,14 @@ export default {
       } while (cursor);
 
       if (env.CLICKS_SNAPSHOTS) {
+        const snapshotPrefix = "smle/snapshots";
         const timestamp = now.toISOString().replace(/[:.]/g, "-");
         for (const [month, rows] of snapshotRowsByMonth.entries()) {
           const header = "vendor,type,date,count\n";
           const body = rows.join("\n");
           const csv = `${header}${body}\n`;
           await env.CLICKS_SNAPSHOTS.put(
-            `snapshots/${month}/${timestamp}.csv`,
+            `${snapshotPrefix}/${month}/${timestamp}.csv`,
             csv
           );
         }

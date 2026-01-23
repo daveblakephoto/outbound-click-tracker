@@ -162,10 +162,13 @@ describe("scheduled rollup (daily -> monthly)", () => {
 
     await worker.scheduled({} as any, env);
 
-    const listed = await SNAPSHOTS.list({ prefix: "snapshots/2025-10/" });
+    const listed = await SNAPSHOTS.list({ prefix: "smle/snapshots/2025-10/" });
     expect(listed.objects.length).toBe(1);
 
     const object = await SNAPSHOTS.get(listed.objects[0].key);
+    expect(listed.objects[0].key.startsWith("smle/snapshots/2025-10/")).toBe(
+      true
+    );
     const csv = await object.text();
     expect(csv).toContain("vendor,type,date,count");
     expect(csv).toContain("vendor-h,website,2025-10-04,5");
