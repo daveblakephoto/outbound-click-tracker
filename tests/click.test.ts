@@ -30,9 +30,68 @@ test("increments click counts", async () => {
   expect(response.status).toBe(302); // redirect is success
 });
 
+test("rejects non-GET requests", async () => {
+  const request = new Request(
+    "https://example.com/click?vendor=test-vendor&type=website&to=https://startmyloveengine.com",
+    { method: "POST" }
+  );
+
+  const env = { CLICKS: globalThis.CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(405);
+});
+
+test("rejects missing parameters", async () => {
+  const request = new Request("https://example.com/click?vendor=test-vendor", {
+    method: "GET"
+  });
+
+  const env = { CLICKS: globalThis.CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(400);
+});
+
 test("rejects invalid vendor slugs", async () => {
   const request = new Request(
     "https://example.com/click?vendor=Bad_Vendor&type=website&to=https://startmyloveengine.com",
+    { method: "GET" }
+  );
+
+  const env = { CLICKS: globalThis.CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(400);
+});
+
+test("rejects invalid click types", async () => {
+  const request = new Request(
+    "https://example.com/click?vendor=test-vendor&type=twitter&to=https://startmyloveengine.com",
+    { method: "GET" }
+  );
+
+  const env = { CLICKS: globalThis.CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(400);
+});
+
+test("rejects invalid destination URLs", async () => {
+  const request = new Request(
+    "https://example.com/click?vendor=test-vendor&type=website&to=not-a-url",
+    { method: "GET" }
+  );
+
+  const env = { CLICKS: globalThis.CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(400);
+});
+
+test("rejects non-https destinations", async () => {
+  const request = new Request(
+    "https://example.com/click?vendor=test-vendor&type=website&to=http://startmyloveengine.com",
     { method: "GET" }
   );
 

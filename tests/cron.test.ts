@@ -1,0 +1,157 @@
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { Miniflare } from "miniflare";
+import worker from "../src/worker";
+
+async function getNum(kv: any, key: string) {
+  const value = await kv.get(key);
+  return value ? parseInt(value, 10) : 0;
+}
+
+describe("scheduled rollup (daily -> monthly)", () => {
+  let mf: Miniflare;
+  let CLICKS: any;
+  const cronNow = "2026-02-15T12:00:00.000Z";
+
+  beforeEach(async () => {
+    mf = new Miniflare({
+      modules: true,
+      script: "export default { fetch() { return new Response('ok'); } }",
+      kvNamespaces: ["CLICKS"]
+    });
+    CLICKS = await mf.getKVNamespace("CLICKS");
+  });
+
+  afterEach(async () => {
+    await mf.dispose();
+  });
+
+  test("rolls up keys older than 28 days and deletes the original daily keys", async () => {
+    const oldDate = "2025-11-30";
+    const newDate = "2025-12-10";
+
+    const oldKey = `vendor-a:website:${oldDate}`;
+    const newKey = `vendor-a:website:${newDate}`;
+
+    await CLICKS.put(oldKey, "7");
+    await CLICKS.put(newKey, "3");
+
+    const env = { CLICKS, CRON_NOW: cronNow } as any;
+
+    await worker.scheduled({} as any, env);
+
+    const month = oldDate.slice(0, 7);
+    const rollupKey = `rollup:vendor-a:website:${month}`;
+
+    expect(await getNum(CLICKS, rollupKey)).toBe(7);
+    expect(await CLICKS.get(oldKey)).toBeNull();
+
+    expect(await getNum(CLICKS, newKey)).toBe(3);
+  });
+
+  test("accumulates multiple old daily keys into the same monthly rollup", async () => {
+    const d1 = "2025-11-01";
+    const d2 = "2025-11-15";
+    const month = "2025-11";
+
+    await CLICKS.put(`vendor-b:instagram:${d1}`, "2");
+    await CLICKS.put(`vendor-b:instagram:${d2}`, "5");
+
+    const env = { CLICKS, CRON_NOW: cronNow } as any;
+
+    await worker.scheduled({} as any, env);
+
+    const rollupKey = `rollup:vendor-b:instagram:${month}`;
+    expect(await getNum(CLICKS, rollupKey)).toBe(7);
+
+    expect(await CLICKS.get(`vendor-b:instagram:${d1}`)).toBeNull();
+    expect(await CLICKS.get(`vendor-b:instagram:${d2}`)).toBeNull();
+  });
+
+  test("keeps current and previous two months intact including the cutoff boundary", async () => {
+    const boundaryDate = "2025-12-01";
+    const key = `vendor-c:website:${boundaryDate}`;
+
+    await CLICKS.put(key, "9");
+
+    const env = { CLICKS, CRON_NOW: cronNow } as any;
+
+    await worker.scheduled({} as any, env);
+
+    expect(await getNum(CLICKS, key)).toBe(9);
+
+    const month = boundaryDate.slice(0, 7);
+    const rollupKey = `rollup:vendor-c:website:${month}`;
+    expect(await CLICKS.get(rollupKey)).toBeNull();
+  });
+
+  test("does not double-count if the cron runs twice", async () => {
+    const oldDate = "2025-11-20";
+    const month = "2025-11";
+    const dailyKey = `vendor-d:website:${oldDate}`;
+    const rollupKey = `rollup:vendor-d:website:${month}`;
+
+    await CLICKS.put(dailyKey, "4");
+
+    const env = { CLICKS, CRON_NOW: cronNow } as any;
+
+    await worker.scheduled({} as any, env);
+    await worker.scheduled({} as any, env);
+
+    expect(await getNum(CLICKS, rollupKey)).toBe(4);
+    expect(await CLICKS.get(dailyKey)).toBeNull();
+  });
+
+  test("ignores non-daily keys and malformed keys", async () => {
+    await CLICKS.put("weirdkey", "10");
+    await CLICKS.put("rollup:vendor-x:website:2025-12", "99");
+    await CLICKS.put("vendor:eek:too:many:parts", "123");
+
+    const env = { CLICKS, CRON_NOW: cronNow } as any;
+
+    await worker.scheduled({} as any, env);
+
+    expect(await getNum(CLICKS, "weirdkey")).toBe(10);
+    expect(await getNum(CLICKS, "rollup:vendor-x:website:2025-12")).toBe(99);
+    expect(await getNum(CLICKS, "vendor:eek:too:many:parts")).toBe(123);
+  });
+
+  test("handles multiple vendors + types correctly", async () => {
+    await CLICKS.put("a:website:2025-10-01", "1");
+    await CLICKS.put("a:instagram:2025-10-01", "2");
+    await CLICKS.put("b:website:2025-10-15", "3");
+
+    const env = { CLICKS, CRON_NOW: cronNow } as any;
+
+    await worker.scheduled({} as any, env);
+
+    expect(await getNum(CLICKS, "rollup:a:website:2025-10")).toBe(1);
+    expect(await getNum(CLICKS, "rollup:a:instagram:2025-10")).toBe(2);
+    expect(await getNum(CLICKS, "rollup:b:website:2025-10")).toBe(3);
+
+    expect(await CLICKS.get("a:website:2025-10-01")).toBeNull();
+    expect(await CLICKS.get("a:instagram:2025-10-01")).toBeNull();
+    expect(await CLICKS.get("b:website:2025-10-15")).toBeNull();
+  });
+
+  test("skips rollup when a lock is present", async () => {
+    await CLICKS.put("vendor-e:website:2025-10-01", "6");
+    await CLICKS.put("rollup:lock", "locked");
+
+    const env = { CLICKS, CRON_NOW: cronNow } as any;
+
+    await worker.scheduled({} as any, env);
+
+    expect(await getNum(CLICKS, "vendor-e:website:2025-10-01")).toBe(6);
+    expect(await getNum(CLICKS, "rollup:vendor-e:website:2025-10")).toBe(0);
+  });
+
+  test("releases the lock after a successful run", async () => {
+    await CLICKS.put("vendor-f:website:2025-10-02", "1");
+
+    const env = { CLICKS, CRON_NOW: cronNow } as any;
+
+    await worker.scheduled({} as any, env);
+
+    expect(await CLICKS.get("rollup:lock")).toBeNull();
+  });
+});

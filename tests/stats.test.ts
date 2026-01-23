@@ -40,3 +40,49 @@ test("returns current stats", async () => {
   const json = await response.json();
   expect(json.vendors.length).toBeGreaterThan(0);
 });
+
+test("rejects non-GET requests", async () => {
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
+    { method: "POST" }
+  );
+
+  const env = {
+    CLICKS: globalThis.CLICKS,
+    ANALYTICS_API_TOKEN: "test-secret"
+  } as any;
+
+  const response = await worker.fetch(request, env);
+  expect(response.status).toBe(405);
+});
+
+test("requires site parameter", async () => {
+  const request = new Request("https://example.com/api/stats?range=7d", {
+    headers: { Authorization: "Bearer test-secret" }
+  });
+
+  const env = {
+    CLICKS: globalThis.CLICKS,
+    ANALYTICS_API_TOKEN: "test-secret"
+  } as any;
+
+  const response = await worker.fetch(request, env);
+  expect(response.status).toBe(400);
+});
+
+test("rejects invalid range", async () => {
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=1y",
+    {
+      headers: { Authorization: "Bearer test-secret" }
+    }
+  );
+
+  const env = {
+    CLICKS: globalThis.CLICKS,
+    ANALYTICS_API_TOKEN: "test-secret"
+  } as any;
+
+  const response = await worker.fetch(request, env);
+  expect(response.status).toBe(400);
+});
