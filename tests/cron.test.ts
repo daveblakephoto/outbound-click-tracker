@@ -10,15 +10,17 @@ async function getNum(kv: any, key: string) {
 describe("scheduled rollup (daily -> monthly)", () => {
   let mf: Miniflare;
   let CLICKS: any;
+  let ARCHIVE: any;
   const cronNow = "2026-02-15T12:00:00.000Z";
 
   beforeEach(async () => {
     mf = new Miniflare({
       modules: true,
       script: "export default { fetch() { return new Response('ok'); } }",
-      kvNamespaces: ["CLICKS"]
+      kvNamespaces: ["CLICKS", "CLICKS_ARCHIVE"]
     });
     CLICKS = await mf.getKVNamespace("CLICKS");
+    ARCHIVE = await mf.getKVNamespace("CLICKS_ARCHIVE");
   });
 
   afterEach(async () => {
@@ -131,6 +133,17 @@ describe("scheduled rollup (daily -> monthly)", () => {
     expect(await CLICKS.get("a:website:2025-10-01")).toBeNull();
     expect(await CLICKS.get("a:instagram:2025-10-01")).toBeNull();
     expect(await CLICKS.get("b:website:2025-10-15")).toBeNull();
+  });
+
+  test("archives daily keys before deletion when archive KV is present", async () => {
+    await CLICKS.put("vendor-g:website:2025-10-03", "8");
+
+    const env = { CLICKS, CLICKS_ARCHIVE: ARCHIVE, CRON_NOW: cronNow } as any;
+
+    await worker.scheduled({} as any, env);
+
+    expect(await ARCHIVE.get("vendor-g:website:2025-10-03")).toBe("8");
+    expect(await CLICKS.get("vendor-g:website:2025-10-03")).toBeNull();
   });
 
   test("skips rollup when a lock is present", async () => {

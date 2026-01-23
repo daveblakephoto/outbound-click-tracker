@@ -275,6 +275,9 @@ export default {
 
           const value = parseInt(await env.CLICKS.get(key.name)) || 0;
           if (value > 0) {
+            if (env.CLICKS_ARCHIVE) {
+              await env.CLICKS_ARCHIVE.put(key.name, String(value));
+            }
             const existing =
               parseInt(await env.CLICKS.get(monthlyKey)) || 0;
 
