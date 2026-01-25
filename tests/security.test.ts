@@ -1,20 +1,26 @@
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, expect, test } from "vitest";
 import { Miniflare } from "miniflare";
 import worker from "../src/worker";
 
 let mf: Miniflare;
+let CLICKS: any;
 
-beforeEach(async () => {
+beforeAll(async () => {
   mf = new Miniflare({
     modules: true,
     script: "export default { fetch() { return new Response('ok'); } }",
     kvNamespaces: ["CLICKS"]
   });
 
-  globalThis.CLICKS = await mf.getKVNamespace("CLICKS");
+  CLICKS = await mf.getKVNamespace("CLICKS");
 });
 
-afterEach(async () => {
+beforeEach(async () => {
+  const list = await CLICKS.list();
+  await Promise.all(list.keys.map(key => CLICKS.delete(key.name)));
+});
+
+afterAll(async () => {
   await mf.dispose();
 });
 
@@ -24,7 +30,7 @@ test("blocks stats without secret", async () => {
   );
 
   const env = {
-    CLICKS: globalThis.CLICKS,
+    CLICKS,
     ANALYTICS_API_TOKEN: "test-secret"
   } as any;
 

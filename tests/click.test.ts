@@ -1,20 +1,26 @@
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, expect, test } from "vitest";
 import { Miniflare } from "miniflare";
 import worker from "../src/worker";
 
 let mf: Miniflare;
+let CLICKS: any;
 
-beforeEach(async () => {
+beforeAll(async () => {
   mf = new Miniflare({
     modules: true,
     script: "export default { fetch() { return new Response('ok'); } }",
     kvNamespaces: ["CLICKS"]
   });
 
-  globalThis.CLICKS = await mf.getKVNamespace("CLICKS");
+  CLICKS = await mf.getKVNamespace("CLICKS");
 });
 
-afterEach(async () => {
+beforeEach(async () => {
+  const list = await CLICKS.list();
+  await Promise.all(list.keys.map(key => CLICKS.delete(key.name)));
+});
+
+afterAll(async () => {
   await mf.dispose();
 });
 
@@ -24,7 +30,7 @@ test("increments click counts", async () => {
     { method: "GET" }
   );
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(302); // redirect is success
@@ -36,7 +42,7 @@ test("rejects non-GET requests", async () => {
     { method: "POST" }
   );
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(405);
@@ -47,7 +53,7 @@ test("rejects missing parameters", async () => {
     method: "GET"
   });
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(400);
@@ -59,7 +65,7 @@ test("rejects invalid vendor slugs", async () => {
     { method: "GET" }
   );
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(400);
@@ -71,7 +77,7 @@ test("rejects invalid click types", async () => {
     { method: "GET" }
   );
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(400);
@@ -83,7 +89,7 @@ test("rejects invalid destination URLs", async () => {
     { method: "GET" }
   );
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(400);
@@ -95,7 +101,7 @@ test("rejects non-https destinations", async () => {
     { method: "GET" }
   );
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(400);
@@ -107,7 +113,7 @@ test("blocks disallowed destination domains", async () => {
     { method: "GET" }
   );
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(403);
@@ -119,7 +125,7 @@ test("rejects allow-list bypass with trailing dot", async () => {
     { method: "GET" }
   );
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(403);
@@ -131,7 +137,7 @@ test("rejects allow-list bypass with suffix trick", async () => {
     { method: "GET" }
   );
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(403);
@@ -143,7 +149,7 @@ test("rejects destination URLs with credentials", async () => {
     { method: "GET" }
   );
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(400);
@@ -157,8 +163,20 @@ test("rejects overly long parameters", async () => {
     { method: "GET" }
   );
 
-  const env = { CLICKS: globalThis.CLICKS } as any;
+  const env = { CLICKS } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(400);
+});
+
+test("allows kacper-goodtimes.com destinations", async () => {
+  const request = new Request(
+    "https://example.com/click?vendor=test-vendor&type=website&to=https://www.kacper-goodtimes.com/",
+    { method: "GET" }
+  );
+
+  const env = { CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(302);
 });

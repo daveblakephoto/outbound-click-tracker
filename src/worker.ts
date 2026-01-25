@@ -96,7 +96,8 @@ export default {
       const ALLOWED_DOMAINS = [
         "dave-blake.com",
         "startmyloveengine.com",
-        "makeupartistbyronbay.com.au"
+        "makeupartistbyronbay.com.au",
+        "kacper-goodtimes.com"
       ];
 
       const isAllowed =

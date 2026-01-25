@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { Miniflare } from "miniflare";
 import worker from "../src/worker";
 
@@ -14,7 +14,7 @@ describe("scheduled rollup (daily -> monthly)", () => {
   let SNAPSHOTS: any;
   const cronNow = "2026-02-15T12:00:00.000Z";
 
-  beforeEach(async () => {
+  beforeAll(async () => {
     mf = new Miniflare({
       modules: true,
       script: "export default { fetch() { return new Response('ok'); } }",
@@ -26,7 +26,18 @@ describe("scheduled rollup (daily -> monthly)", () => {
     SNAPSHOTS = await mf.getR2Bucket("CLICKS_SNAPSHOTS");
   });
 
-  afterEach(async () => {
+  beforeEach(async () => {
+    const kvs = [CLICKS, ARCHIVE];
+    for (const kv of kvs) {
+      const list = await kv.list();
+      await Promise.all(list.keys.map(key => kv.delete(key.name)));
+    }
+
+    const objects = await SNAPSHOTS.list();
+    await Promise.all(objects.objects.map(obj => SNAPSHOTS.delete(obj.key)));
+  });
+
+  afterAll(async () => {
     await mf.dispose();
   });
 
