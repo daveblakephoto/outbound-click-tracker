@@ -36,10 +36,28 @@ test("increments click counts", async () => {
   expect(response.status).toBe(302); // redirect is success
 });
 
-test("rejects non-GET requests", async () => {
+test("accepts POST click payloads", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const request = new Request("https://example.com/click", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vendor: "test-vendor",
+      type: "website"
+    })
+  });
+
+  const env = { CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(204);
+  expect(await CLICKS.get(`test-vendor:website:${today}`)).toBe("1");
+});
+
+test("rejects non-GET/POST requests", async () => {
   const request = new Request(
     "https://example.com/click?vendor=test-vendor&type=website&to=https://startmyloveengine.com",
-    { method: "POST" }
+    { method: "PUT" }
   );
 
   const env = { CLICKS } as any;
