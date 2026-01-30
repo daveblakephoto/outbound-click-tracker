@@ -210,10 +210,72 @@ export default {
        CLICK TRACKING (PUBLIC)
        ---------------------------- */
     if (url.pathname === "/click") {
+      const clickCorsHeaders = getVisitCorsHeaders(request);
+
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: clickCorsHeaders });
+      }
+
+      if (request.method === "POST") {
+        let payload;
+        try {
+          payload = await request.json();
+        } catch {
+          return new Response("Invalid payload", {
+            status: 400,
+            headers: clickCorsHeaders
+          });
+        }
+
+        const vendor =
+          typeof payload?.vendor === "string" ? payload.vendor.trim() : "";
+        const type =
+          typeof payload?.type === "string"
+            ? payload.type.trim()
+            : typeof payload?.target === "string"
+              ? payload.target.trim()
+              : "";
+
+        if (!vendor || !type) {
+          return new Response("Missing parameters", {
+            status: 400,
+            headers: clickCorsHeaders
+          });
+        }
+
+        if (vendor.length > 64) {
+          return new Response("Invalid parameters", {
+            status: 400,
+            headers: clickCorsHeaders
+          });
+        }
+
+        if (!VENDOR_SLUG_REGEX.test(vendor)) {
+          return new Response("Invalid vendor", {
+            status: 400,
+            headers: clickCorsHeaders
+          });
+        }
+
+        if (!["website", "instagram"].includes(type)) {
+          return new Response("Invalid type", {
+            status: 400,
+            headers: clickCorsHeaders
+          });
+        }
+
+        const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+        const key = `${vendor}:${type}:${date}`;
+        const current = parseInt((await env.CLICKS.get(key)) || "0", 10);
+        await env.CLICKS.put(key, String(current + 1));
+
+        return new Response(null, { status: 204, headers: clickCorsHeaders });
+      }
+
       if (request.method !== "GET") {
         return new Response("Method not allowed", {
           status: 405,
-          headers: { Allow: "GET" }
+          headers: { Allow: "GET, POST, OPTIONS" }
         });
       }
 
