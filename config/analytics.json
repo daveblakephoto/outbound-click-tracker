@@ -1,0 +1,21 @@
+{
+  "allowedPages": [
+    "profile",
+    "spotlight",
+    "featured",
+    "basic",
+    "unpaid",
+    "article"
+  ],
+  "allowedTiers": [
+    "spotlight",
+    "featured",
+    "basic",
+    "unpaid"
+  ],
+  "vendorSlugRegex": "^[a-z0-9-]+$",
+  "internalDomains": [
+    "startmyloveengine.com",
+    "go.startmyloveengine.com"
+  ]
+}

@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "sync:analytics-config": "node scripts/sync-analytics-config.js",
+    "predeploy": "npm run sync:analytics-config",
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "wrangler dev",

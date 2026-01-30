@@ -2,21 +2,27 @@
 // - CLICK_SIGNING_SECRET enables HMAC-signed click URLs
 // - RATE_LIMIT_PER_MINUTE enables per-IP rate limiting
 // Both are disabled unless explicitly configured
-const INTERNAL_REFERRER_DOMAIN = "startmyloveengine.com";
-const DEFAULT_PAGE_ALLOWLIST = new Set([
-  "profile",
-  "spotlight",
-  "featured",
-  "basic",
-  "unpaid",
-  "article"
-]);
-const TIER_ALLOWLIST = new Set([
-  "spotlight",
-  "featured",
-  "basic",
-  "unpaid"
-]);
+import analyticsConfig from "../config/analytics.json" assert { type: "json" };
+
+const CONFIG = analyticsConfig as {
+  allowedPages: string[];
+  allowedTiers: string[];
+  vendorSlugRegex: string;
+  internalDomains: string[];
+};
+
+const DEFAULT_PAGE_ALLOWLIST = new Set(
+  (CONFIG.allowedPages || []).map(value => value.trim().toLowerCase())
+);
+const TIER_ALLOWLIST = new Set(
+  (CONFIG.allowedTiers || []).map(value => value.trim().toLowerCase())
+);
+const VENDOR_SLUG_REGEX = CONFIG.vendorSlugRegex
+  ? new RegExp(CONFIG.vendorSlugRegex)
+  : /^[a-z0-9-]+$/;
+const INTERNAL_REFERRER_DOMAINS = new Set(
+  (CONFIG.internalDomains || []).map(value => value.toLowerCase())
+);
 
 const MAX_REFERRER_LENGTH = 2048;
 const VISIT_ALLOWED_ORIGINS = new Set([
@@ -24,7 +30,7 @@ const VISIT_ALLOWED_ORIGINS = new Set([
   "https://www.startmyloveengine.com"
 ]);
 
-const isSafeSlug = value => /^[a-z0-9-]+$/.test(value);
+const isSafeSlug = value => VENDOR_SLUG_REGEX.test(value);
 
 const getAllowlist = value => {
   if (typeof value !== "string") return null;
@@ -200,7 +206,7 @@ export default {
       }
 
       // Vendor slug validation (safe KV keys)
-      if (!/^[a-z0-9-]+$/.test(vendor)) {
+      if (!VENDOR_SLUG_REGEX.test(vendor)) {
         return new Response("Invalid vendor", { status: 400 });
       }
 
@@ -383,9 +389,9 @@ export default {
         if (refUrl) {
           const hostname = normalizeHostname(refUrl.hostname);
           if (hostname && isSafeHostname(hostname)) {
-            const isInternal =
-              hostname === INTERNAL_REFERRER_DOMAIN ||
-              hostname.endsWith(`.${INTERNAL_REFERRER_DOMAIN}`);
+            const isInternal = Array.from(INTERNAL_REFERRER_DOMAINS).some(
+              domain => hostname === domain || hostname.endsWith(`.${domain}`)
+            );
 
             if (isInternal) {
               const bucket = classifyInternalReferrer(refUrl.pathname);
