@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "sync:analytics-config": "node scripts/sync-analytics-config.js",
-    "predeploy": "npm run sync:analytics-config",
+    "predeploy": "npm run sync:analytics-config && bash scripts/predeploy-check.sh",
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy --env production"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240419.0",

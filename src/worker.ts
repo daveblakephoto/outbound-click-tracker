@@ -29,6 +29,10 @@ const VISIT_ALLOWED_ORIGINS = new Set([
   "https://startmyloveengine.com",
   "https://www.startmyloveengine.com"
 ]);
+const EXPORT_ALLOWED_ORIGINS = new Set([
+  "https://startmyloveengine.com",
+  "https://www.startmyloveengine.com"
+]);
 
 const isSafeSlug = value => VENDOR_SLUG_REGEX.test(value);
 
@@ -82,6 +86,27 @@ const getVisitCorsHeaders = request => {
     "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Max-Age": "86400"
+  };
+};
+
+const isAllowedExportOrigin = origin => {
+  if (!origin) return false;
+  if (EXPORT_ALLOWED_ORIGINS.has(origin)) return true;
+  return origin.endsWith(".mocha.app");
+};
+
+const getExportCorsHeaders = request => {
+  const origin = request.headers.get("Origin");
+  const allowedOrigin = isAllowedExportOrigin(origin)
+    ? origin
+    : "https://startmyloveengine.com";
+
+  return {
+    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400"
   };
@@ -657,32 +682,38 @@ export default {
        VENDOR CSV EXPORT (AUTHENTICATED)
        ---------------------------- */
     if (url.pathname === "/api/export/vendor.csv") {
+      const corsHeaders = getExportCorsHeaders(request);
+
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
       if (request.method !== "GET") {
         return new Response("Method not allowed", {
           status: 405,
-          headers: { Allow: "GET" }
+          headers: { Allow: "GET", ...corsHeaders }
         });
       }
 
       const auth = request.headers.get("Authorization");
       if (auth !== `Bearer ${env.ANALYTICS_API_TOKEN}`) {
-        return new Response("Unauthorized", { status: 401 });
+        return new Response("Unauthorized", { status: 401, headers: corsHeaders });
       }
 
       const vendor = url.searchParams.get("vendor") || "";
       const range = url.searchParams.get("range") || "28d";
 
       if (!vendor) {
-        return new Response("Missing vendor", { status: 400 });
+        return new Response("Missing vendor", { status: 400, headers: corsHeaders });
       }
 
       if (vendor.length > 64 || !isSafeSlug(vendor)) {
-        return new Response("Invalid vendor", { status: 400 });
+        return new Response("Invalid vendor", { status: 400, headers: corsHeaders });
       }
 
       const rangeDays = { "7d": 7, "28d": 28, "90d": 90 }[range];
       if (!rangeDays) {
-        return new Response("Invalid range", { status: 400 });
+        return new Response("Invalid range", { status: 400, headers: corsHeaders });
       }
 
       const today = new Date();
@@ -771,7 +802,8 @@ export default {
       return new Response(csv, {
         headers: {
           "Content-Type": "text/csv; charset=utf-8",
-          "Cache-Control": "no-store"
+          "Cache-Control": "no-store",
+          ...corsHeaders
         }
       });
     }

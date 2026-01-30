@@ -11,3 +11,7 @@ r2_buckets = [
 ]
 [triggers]
 crons = ["0 3 * * *"]
+
+[env.production]
+name = "smle-click-tracker"
+route = "go.startmyloveengine.com/*"
