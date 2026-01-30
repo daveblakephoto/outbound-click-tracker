@@ -353,6 +353,9 @@ export default {
       }
 
       const { vendor, page, tier } = validation;
+      if (env.DEBUG_VISITS === "1") {
+        console.log("visit", payload);
+      }
 
       const ip =
         request.headers.get("cf-connecting-ip") ||
@@ -640,6 +643,170 @@ export default {
           dailyViews: dailyViewTotals,
           dailyUniqueViews: dailyUniqueViewTotals,
           tierViews
+        }),
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store"
+          }
+        }
+      );
+    }
+
+    /* ----------------------------
+       VENDOR CSV EXPORT (AUTHENTICATED)
+       ---------------------------- */
+    if (url.pathname === "/api/export/vendor.csv") {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", {
+          status: 405,
+          headers: { Allow: "GET" }
+        });
+      }
+
+      const auth = request.headers.get("Authorization");
+      if (auth !== `Bearer ${env.ANALYTICS_API_TOKEN}`) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const vendor = url.searchParams.get("vendor") || "";
+      const range = url.searchParams.get("range") || "28d";
+
+      if (!vendor) {
+        return new Response("Missing vendor", { status: 400 });
+      }
+
+      if (vendor.length > 64 || !isSafeSlug(vendor)) {
+        return new Response("Invalid vendor", { status: 400 });
+      }
+
+      const rangeDays = { "7d": 7, "28d": 28, "90d": 90 }[range];
+      if (!rangeDays) {
+        return new Response("Invalid range", { status: 400 });
+      }
+
+      const today = new Date();
+      const dates = [];
+      for (let i = rangeDays - 1; i >= 0; i--) {
+        const d = new Date(today);
+        d.setDate(d.getDate() - i);
+        dates.push(d.toISOString().slice(0, 10));
+      }
+
+      const perDate = Object.fromEntries(
+        dates.map(date => [
+          date,
+          {
+            views: 0,
+            uniqueViews: 0,
+            website: 0,
+            instagram: 0
+          }
+        ])
+      );
+
+      let cursor;
+      do {
+        const list = await env.CLICKS.list({ cursor });
+
+        for (const key of list.keys) {
+          const parts = key.name.split(":");
+          if (parts[0] === "rollup") continue;
+          if (parts[0] === "rl" || parts[0] === "uviewlock") continue;
+          if (parts[0] === "raw") continue;
+
+          if (parts[0] === "view" && parts.length === 3) {
+            const [, keyVendor, date] = parts;
+            if (keyVendor !== vendor || !(date in perDate)) continue;
+            const value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            if (!value) continue;
+            perDate[date].views += value;
+            continue;
+          }
+
+          if (parts[0] === "uview" && parts.length === 3) {
+            const [, keyVendor, date] = parts;
+            if (keyVendor !== vendor || !(date in perDate)) continue;
+            const value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            if (!value) continue;
+            perDate[date].uniqueViews += value;
+            continue;
+          }
+
+          if (parts.length !== 3) continue;
+          const [keyVendor, type, date] = parts;
+          if (keyVendor !== vendor) continue;
+          if (!["website", "instagram"].includes(type)) continue;
+          if (!(date in perDate)) continue;
+
+          const value = parseInt(await env.CLICKS.get(key.name)) || 0;
+          if (!value) continue;
+
+          perDate[date][type] += value;
+        }
+
+        cursor = list.cursor;
+      } while (cursor);
+
+      const header =
+        "date,views,unique_views,website_clicks,instagram_clicks,ctr\n";
+      const rows = dates.map(date => {
+        const entry = perDate[date];
+        const clicks = entry.website + entry.instagram;
+        const ctr =
+          entry.views > 0
+            ? (clicks / entry.views).toFixed(4)
+            : "0.0000";
+        return [
+          date,
+          entry.views,
+          entry.uniqueViews,
+          entry.website,
+          entry.instagram,
+          ctr
+        ].join(",");
+      });
+      const csv = `${header}${rows.join("\n")}\n`;
+
+      return new Response(csv, {
+        headers: {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Cache-Control": "no-store"
+        }
+      });
+    }
+
+    /* ----------------------------
+       DEBUG KV INSPECTION (DEV-ONLY)
+       ---------------------------- */
+    if (url.pathname === "/_debug/kv") {
+      if (env.DEBUG_MODE !== "1") {
+        return new Response("Not found", { status: 404 });
+      }
+
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", {
+          status: 405,
+          headers: { Allow: "GET" }
+        });
+      }
+
+      const auth = request.headers.get("Authorization");
+      if (auth !== `Bearer ${env.ANALYTICS_API_TOKEN}`) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const list = await env.CLICKS.list();
+      const samples = {};
+      for (const key of list.keys.slice(0, 50)) {
+        samples[key.name] = await env.CLICKS.get(key.name);
+      }
+
+      return new Response(
+        JSON.stringify({
+          keys: list.keys,
+          cursor: list.cursor,
+          samples
         }),
         {
           headers: {
