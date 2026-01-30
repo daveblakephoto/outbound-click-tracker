@@ -3,8 +3,7 @@ main = "src/worker.ts"
 compatibility_date = "2026-01-23"
 
 kv_namespaces = [
-  { binding = "CLICKS", id = "103b765eda8a4faba6bf0ac2986874c6" },
-  { binding = "CLICKS_ARCHIVE", id = "00000000000000000000000000000000" }
+  { binding = "CLICKS", id = "103b765eda8a4faba6bf0ac2986874c6" }
 ]
 
 r2_buckets = [

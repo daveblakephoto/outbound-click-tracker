@@ -12,7 +12,8 @@ Fast, local, deterministic tests for a Cloudflare Workers click tracker using Vi
 ## Notes
 
 - Update `wrangler.toml` with your real KV namespace IDs.
-- Set `CLICK_SECRET` in your environment or Wrangler secrets for `/stats`.
+- Set `ANALYTICS_API_TOKEN` as a Wrangler secret for `/api/stats` auth.
+- Optional env vars: `CLICK_SIGNING_SECRET`, `RATE_LIMIT_PER_MINUTE`, `VENDOR_ALLOWLIST`, `VISIT_PAGE_ALLOWLIST`, `CRON_DRY_RUN`, `CRON_MAX_KEYS`.
 - Cron rollup keeps daily keys for the current month and the previous two months, then rolls older days into monthly keys (`rollup:vendor:type:YYYY-MM`).
 - Tests can force cron time via `CRON_NOW` (ISO timestamp) passed to `scheduled()` for deterministic rollup behavior.
-- Optional R2 snapshots write monthly CSVs to `CLICKS_SNAPSHOTS` under `snapshots/YYYY-MM/` for audit and vendor exports.
+- Optional R2 snapshots write monthly CSVs to `CLICKS_SNAPSHOTS` under `smle/snapshots/YYYY-MM/` plus raw key snapshots under `smle/snapshots-raw/YYYY-MM/`.

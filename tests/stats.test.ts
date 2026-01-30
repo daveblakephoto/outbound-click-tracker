@@ -92,3 +92,30 @@ test("rejects invalid range", async () => {
   const response = await worker.fetch(request, env);
   expect(response.status).toBe(400);
 });
+
+test("returns tier views", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  await CLICKS.put(`tview:spotlight:${today}`, "4");
+  await CLICKS.put(`tview:featured:${today}`, "2");
+
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
+    {
+      headers: { Authorization: "Bearer test-secret" }
+    }
+  );
+
+  const env = {
+    CLICKS,
+    ANALYTICS_API_TOKEN: "test-secret"
+  } as any;
+
+  const response = await worker.fetch(request, env);
+  expect(response.status).toBe(200);
+
+  const json = await response.json();
+  expect(json.tierViews.spotlight).toBe(4);
+  expect(json.tierViews.featured).toBe(2);
+  expect(json.tierViews.basic).toBe(0);
+  expect(json.tierViews.unpaid).toBe(0);
+});

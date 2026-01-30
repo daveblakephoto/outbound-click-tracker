@@ -149,6 +149,23 @@ describe("scheduled rollup (daily -> monthly)", () => {
     expect(await CLICKS.get("b:website:2025-10-15")).toBeNull();
   });
 
+  test("rolls up tier view counters", async () => {
+    const oldDate = "2025-11-05";
+    const month = "2025-11";
+
+    await CLICKS.put(`tview:featured:${oldDate}`, "6");
+    await CLICKS.put(`tview:vendor-z:featured:${oldDate}`, "3");
+
+    const env = { CLICKS, CRON_NOW: cronNow } as any;
+
+    await worker.scheduled({} as any, env);
+
+    expect(await getNum(CLICKS, `rollup:tview:featured:${month}`)).toBe(6);
+    expect(await getNum(CLICKS, `rollup:tview:vendor-z:featured:${month}`)).toBe(3);
+    expect(await CLICKS.get(`tview:featured:${oldDate}`)).toBeNull();
+    expect(await CLICKS.get(`tview:vendor-z:featured:${oldDate}`)).toBeNull();
+  });
+
   test("archives daily keys before deletion when archive KV is present", async () => {
     await CLICKS.put("vendor-g:website:2025-10-03", "8");
 
