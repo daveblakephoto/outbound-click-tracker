@@ -54,6 +54,28 @@ test("accepts POST click payloads", async () => {
   expect(await CLICKS.get(`test-vendor:website:${today}`)).toBe("1");
 });
 
+test("includes CORS headers on POST click", async () => {
+  const origin = "https://startmyloveengine.com";
+  const request = new Request("https://example.com/click", {
+    method: "POST",
+    headers: {
+      Origin: origin,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      vendor: "test-vendor",
+      type: "website"
+    })
+  });
+
+  const env = { CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(204);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+  expect(response.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+});
+
 test("rejects non-GET/POST requests", async () => {
   const request = new Request(
     "https://example.com/click?vendor=test-vendor&type=website&to=https://startmyloveengine.com",
