@@ -19,6 +19,10 @@ const TIER_ALLOWLIST = new Set([
 ]);
 
 const MAX_REFERRER_LENGTH = 2048;
+const VISIT_ALLOWED_ORIGINS = new Set([
+  "https://startmyloveengine.com",
+  "https://www.startmyloveengine.com"
+]);
 
 const isSafeSlug = value => /^[a-z0-9-]+$/.test(value);
 
@@ -60,6 +64,21 @@ const sha1Hex = async input => {
 const incrementCounter = async (env, key, options) => {
   const current = parseInt((await env.CLICKS.get(key)) || "0", 10);
   await env.CLICKS.put(key, String(current + 1), options);
+};
+
+const getVisitCorsHeaders = request => {
+  const origin = request.headers.get("Origin");
+  const allowedOrigin = VISIT_ALLOWED_ORIGINS.has(origin)
+    ? origin
+    : "https://startmyloveengine.com";
+
+  return {
+    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Max-Age": "86400"
+  };
 };
 
 const parseBoolFlag = value => {
@@ -285,11 +304,7 @@ export default {
        VISIT TRACKING (PUBLIC)
        ---------------------------- */
     if (url.pathname === "/visit") {
-      const corsHeaders = {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
-      };
+      const corsHeaders = getVisitCorsHeaders(request);
 
       if (request.method === "OPTIONS") {
         return new Response(null, { status: 204, headers: corsHeaders });

@@ -51,3 +51,47 @@ test("increments tier view counters on visit", async () => {
   expect(await CLICKS.get(`tview:featured:${today}`)).toBe("1");
   expect(await CLICKS.get(`tview:test-vendor:featured:${today}`)).toBe("1");
 });
+
+test("returns CORS headers on /visit preflight", async () => {
+  const origin = "https://startmyloveengine.com";
+  const request = new Request("https://example.com/visit", {
+    method: "OPTIONS",
+    headers: {
+      Origin: origin,
+      "Access-Control-Request-Method": "POST"
+    }
+  });
+
+  const env = { CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(204);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+  expect(response.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+  expect(response.headers.get("Access-Control-Allow-Methods")).toBe(
+    "POST, OPTIONS"
+  );
+  expect(response.headers.get("Access-Control-Allow-Headers")).toBe(
+    "Content-Type, Authorization"
+  );
+  expect(response.headers.get("Access-Control-Max-Age")).toBe("86400");
+});
+
+test("includes CORS headers on /visit errors", async () => {
+  const origin = "https://www.startmyloveengine.com";
+  const request = new Request("https://example.com/visit", {
+    method: "POST",
+    headers: {
+      Origin: origin,
+      "Content-Type": "application/json"
+    },
+    body: "{"
+  });
+
+  const env = { CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(400);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+  expect(response.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+});
