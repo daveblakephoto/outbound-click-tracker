@@ -5,7 +5,9 @@
     "dave-blake": {
       "plan": "featured",
       "placements": {
-        "spotlight": { "active": true }
+        "spotlight": {
+          "active": true
+        }
       }
     },
     "nahid-kholghi": {
@@ -16,20 +18,67 @@
       "plan": "unpaid",
       "placements": {}
     },
-    "vendor-002": { "plan": "unpaid", "placements": {} },
-    "vendor-003": { "plan": "unpaid", "placements": {} },
-    "vendor-004": { "plan": "unpaid", "placements": {} },
-    "vendor-005": { "plan": "unpaid", "placements": {} },
-    "vendor-006": { "plan": "unpaid", "placements": {} },
-    "vendor-007": { "plan": "unpaid", "placements": {} },
-    "vendor-008": { "plan": "unpaid", "placements": {} },
-    "vendor-009": { "plan": "unpaid", "placements": {} },
-    "vendor-010": { "plan": "unpaid", "placements": {} },
-    "byron-bay": { "plan": "unpaid", "placements": {} }
+    "vendor-002": {
+      "plan": "unpaid",
+      "placements": {}
+    },
+    "vendor-003": {
+      "plan": "unpaid",
+      "placements": {}
+    },
+    "vendor-004": {
+      "plan": "unpaid",
+      "placements": {}
+    },
+    "vendor-005": {
+      "plan": "unpaid",
+      "placements": {}
+    },
+    "vendor-006": {
+      "plan": "unpaid",
+      "placements": {}
+    },
+    "vendor-007": {
+      "plan": "unpaid",
+      "placements": {}
+    },
+    "vendor-008": {
+      "plan": "unpaid",
+      "placements": {}
+    },
+    "vendor-009": {
+      "plan": "unpaid",
+      "placements": {}
+    },
+    "vendor-010": {
+      "plan": "unpaid",
+      "placements": {}
+    },
+    "spinelli-kilcollin": {
+      "plan": "unpaid",
+      "placements": {}
+    },
+    "sun-ranch-byron": {
+      "plan": "unpaid",
+      "placements": {}
+    },
+    "byron-bay": {
+      "plan": "unpaid",
+      "placements": {}
+    }
   },
   "enums": {
-    "plan": ["unpaid", "basic", "featured"],
-    "placement": ["spotlight", "featured-list", "home", "search"]
+    "plan": [
+      "unpaid",
+      "basic",
+      "featured"
+    ],
+    "placement": [
+      "spotlight",
+      "featured-list",
+      "home",
+      "search"
+    ]
   },
   "defaults": {
     "plan": "unpaid",
