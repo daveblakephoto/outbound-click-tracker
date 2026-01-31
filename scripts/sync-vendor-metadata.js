@@ -34,6 +34,18 @@ const run = async () => {
       process.exit(1);
     }
 
+    if (!json || typeof json !== "object") {
+      console.error("Unexpected vendor-metadata schema: not an object");
+      process.exit(1);
+    }
+
+    if (!json.vendors || Array.isArray(json.vendors)) {
+      console.error(
+        "Unexpected vendor-metadata schema: 'vendors' must be an object map of slug -> entry (not an array). Failing sync."
+      );
+      process.exit(1);
+    }
+
     writeJsonPretty(DEST_PATH, json);
     console.log(`Synced vendor-metadata from ${SOURCE_URL} -> ${DEST_PATH}`);
   } catch (err) {
