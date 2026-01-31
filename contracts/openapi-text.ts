@@ -1,0 +1,170 @@
+// Generated from analytics.openapi.yaml — keep in sync.
+// The worker uses this string to serve /openapi without requiring a YAML loader.
+export const OPENAPI_YAML = `openapi: 3.1.0
+info:
+  title: StartMyLoveEngine Analytics API
+  version: 1.0.0
+  description: |
+    Contract for analytics collection and reporting.
+    Change policy:
+      - Minor versions may add fields/endpoints (additive).
+      - Breaking changes require a major bump and published deprecation window.
+      - Deprecated request fields remain accepted for at least 30 days before removal.
+servers:
+  - url: https://go.startmyloveengine.com
+paths:
+  /visit:
+    options:
+      summary: Preflight for visit beacon
+      responses:
+        "204":
+          description: CORS preflight
+    post:
+      summary: Record a visit view
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                vendor:
+                  type: string
+                  description: vendor slug
+                page:
+                  type: string
+                  description: page identifier (see contract allowlists)
+                tier:
+                  type: string
+                  description: legacy tier (spotlight|featured|basic|unpaid)
+                plan:
+                  type: string
+                  description: billing plan (unpaid|basic|featured)
+                placements:
+                  type: array
+                  items:
+                    type: string
+                referrer:
+                  type: string
+                url:
+                  type: string
+              required:
+                - vendor
+                - page
+      responses:
+        "204":
+          description: visit recorded
+        "400":
+          description: validation error
+  /click:
+    get:
+      summary: Redirect click tracker
+      parameters:
+        - in: query
+          name: vendor
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: type
+          required: true
+          schema:
+            type: string
+            enum: [website, instagram]
+        - in: query
+          name: to
+          required: true
+          schema:
+            type: string
+      responses:
+        "302":
+          description: redirects to destination
+        "400":
+          description: invalid input
+    post:
+      summary: Background click increment (no redirect)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                vendor:
+                  type: string
+                type:
+                  type: string
+                  enum: [website, instagram]
+              required: [vendor, type]
+      responses:
+        "204":
+          description: click recorded
+        "400":
+          description: invalid input
+  /api/stats:
+    get:
+      summary: Aggregated stats
+      parameters:
+        - in: query
+          name: site
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: range
+          schema:
+            type: string
+            enum: [7d, 28d, 90d]
+            default: 28d
+      responses:
+        "200":
+          description: stats json
+        "401":
+          description: auth failed
+  /api/export/vendor.csv:
+    options:
+      summary: Preflight for CSV export
+      responses:
+        "204":
+          description: CORS preflight
+    get:
+      summary: Vendor CSV export
+      parameters:
+        - in: query
+          name: vendor
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: range
+          schema:
+            type: string
+            enum: [7d, 28d, 90d]
+            default: 28d
+      responses:
+        "200":
+          description: CSV payload
+          content:
+            text/csv:
+              schema:
+                type: string
+        "401":
+          description: auth failed
+  /schema:
+    get:
+      summary: Analytics contract schema
+      responses:
+        "200":
+          description: contract json
+  /openapi:
+    get:
+      summary: OpenAPI contract document
+      responses:
+        "200":
+          description: OpenAPI yaml
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+`;

@@ -18,6 +18,21 @@ Fast, local, deterministic tests for a Cloudflare Workers click tracker using Vi
 - Tests can force cron time via `CRON_NOW` (ISO timestamp) passed to `scheduled()` for deterministic rollup behavior.
 - Optional R2 snapshots write monthly CSVs to `CLICKS_SNAPSHOTS` under `smle/snapshots/YYYY-MM/` plus raw key snapshots under `smle/snapshots-raw/YYYY-MM/`.
 
+## API contract
+
+- Source of truth: `contracts/analytics.contract.json` (enums, CORS allowlists, regex) and `contracts/analytics.openapi.yaml` (HTTP surface).
+- Runtime discovery:
+  - `GET /schema` — returns contract JSON plus resolved/normalized allowlists (cached 1h).
+  - `GET /openapi` — returns OpenAPI YAML (cached 1h).
+- Producers (startmyloveengine site) should import the contract at build time; consumers (mocha dashboard) may cache `/schema` for up to 1h.
+- Change policy: additive-only within a minor version; breaking changes require a major bump and a deprecation window.
+
+### Optional post-deploy smoke check
+
+- Run `npm run smoke` (uses `scripts/smoke-check.sh`) with `BASE_URL` set to your deployed hostname.
+- Verifies `/schema` returns the expected `apiVersion` and populated allowlists, and `/openapi` contains the `/visit` path.
+- Add this as a post-deploy step in GitHub Actions or Cloudflare Build (e.g., deploy command `npm run deploy && BASE_URL=https://go.startmyloveengine.com npm run smoke`).
+
 ## How secrets are managed
 
 Secrets are stored in Cloudflare’s Worker secret store and set via Wrangler for the production environment.

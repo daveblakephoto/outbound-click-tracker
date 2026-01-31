@@ -2,39 +2,247 @@
 // - CLICK_SIGNING_SECRET enables HMAC-signed click URLs
 // - RATE_LIMIT_PER_MINUTE enables per-IP rate limiting
 // Both are disabled unless explicitly configured
-import analyticsConfig from "../config/analytics.json" assert { type: "json" };
+import contractJson from "../contracts/analytics.contract.json" assert { type: "json" };
+import { OPENAPI_YAML } from "../contracts/openapi-text";
+import vendorMetadataRaw from "../config/vendor-metadata.json" assert { type: "json" };
 
-const CONFIG = analyticsConfig as {
+// plan = billing tier (single value); placements = promotional surfaces (multi-value)
+
+const CONTRACT = contractJson as {
+  apiVersion: string;
   allowedPages: string[];
-  allowedTiers: string[];
-  vendorSlugRegex: string;
+  allowedPlans: string[];
+  allowedPlacements: string[];
+  allowedClickTypes: string[];
   internalDomains: string[];
+  vendorSlugRegex: string;
+  defaultRanges: string[];
+  cors: {
+    visitAllowedOrigins: string[];
+    exportAllowedOrigins: string[];
+  };
+};
+const CONTRACT_VERSION = CONTRACT.apiVersion || "1.0.0";
+
+type VendorMetadata = {
+  version: number;
+  generatedAt: string;
+  vendors: Record<
+    string,
+    {
+      plan?: "unpaid" | "basic" | "featured";
+      placements?: Record<
+        string,
+        {
+          active?: boolean;
+          start?: string;
+          end?: string;
+          priority?: number;
+        }
+      >;
+      labels?: string[];
+      notes?: string;
+    }
+  >;
+  enums: {
+    plan: string[];
+    placement: string[];
+  };
+  defaults: {
+    plan: "unpaid" | "basic" | "featured";
+    placements: Record<
+      string,
+      {
+        active?: boolean;
+        start?: string;
+        end?: string;
+        priority?: number;
+      }
+    >;
+  };
 };
 
-const DEFAULT_PAGE_ALLOWLIST = new Set(
-  (CONFIG.allowedPages || []).map(value => value.trim().toLowerCase())
+const ALLOWED_PAGES = new Set(
+  (CONTRACT.allowedPages || []).map(value => value.trim().toLowerCase())
 );
-const TIER_ALLOWLIST = new Set(
-  (CONFIG.allowedTiers || []).map(value => value.trim().toLowerCase())
+const ALLOWED_PLANS = new Set(
+  (CONTRACT.allowedPlans || []).map(value => value.trim().toLowerCase())
 );
-const VENDOR_SLUG_REGEX = CONFIG.vendorSlugRegex
-  ? new RegExp(CONFIG.vendorSlugRegex)
+const ALLOWED_PLACEMENTS = new Set(
+  (CONTRACT.allowedPlacements || []).map(value => value.trim().toLowerCase())
+);
+const ALLOWED_CLICK_TYPES = new Set(
+  (CONTRACT.allowedClickTypes || []).map(value => value.trim().toLowerCase())
+);
+const DEFAULT_PAGE_ALLOWLIST = ALLOWED_PAGES;
+const TIER_ALLOWLIST = new Set([
+  ...ALLOWED_PLANS,
+  "spotlight"
+]);
+const VENDOR_SLUG_REGEX = CONTRACT.vendorSlugRegex
+  ? new RegExp(CONTRACT.vendorSlugRegex)
   : /^[a-z0-9-]+$/;
 const INTERNAL_REFERRER_DOMAINS = new Set(
-  (CONFIG.internalDomains || []).map(value => value.toLowerCase())
+  (CONTRACT.internalDomains || []).map(value => value.toLowerCase())
 );
 
 const MAX_REFERRER_LENGTH = 2048;
-const VISIT_ALLOWED_ORIGINS = new Set([
-  "https://startmyloveengine.com",
-  "https://www.startmyloveengine.com"
-]);
-const EXPORT_ALLOWED_ORIGINS = new Set([
-  "https://startmyloveengine.com",
-  "https://www.startmyloveengine.com"
-]);
+const VISIT_ALLOWED_ORIGINS = new Set(
+  (CONTRACT.cors?.visitAllowedOrigins || []).map(origin => origin.trim())
+);
+const EXPORT_ALLOWED_ORIGINS = new Set(
+  (CONTRACT.cors?.exportAllowedOrigins || []).map(origin => origin.trim())
+);
+
+const RANGE_DAY_MAP = (() => {
+  const map = {};
+  for (const range of CONTRACT.defaultRanges || ["7d", "28d", "90d"]) {
+    const days = parseInt(range, 10);
+    if (!Number.isNaN(days)) {
+      map[range] = days;
+    }
+  }
+  return Object.keys(map).length ? map : { "7d": 7, "28d": 28, "90d": 90 };
+})();
+
+const getRangeDays = range => RANGE_DAY_MAP[range] || 0;
+
+const normalizeMetadata = (input: any): VendorMetadata => {
+  const fallback = {
+    version: 1,
+    generatedAt: new Date(0).toISOString(),
+    vendors: {},
+    enums: {
+      plan: ["unpaid", "basic", "featured"],
+      placement: []
+    },
+    defaults: {
+      plan: "unpaid",
+      placements: {}
+    }
+  } satisfies VendorMetadata;
+
+  if (!input || typeof input !== "object") return fallback;
+
+  return {
+    version:
+      typeof input.version === "number" ? input.version : fallback.version,
+    generatedAt:
+      typeof input.generatedAt === "string"
+        ? input.generatedAt
+        : fallback.generatedAt,
+    vendors:
+      input.vendors && typeof input.vendors === "object"
+        ? input.vendors
+        : fallback.vendors,
+    enums: {
+      plan: Array.isArray(input.enums?.plan)
+        ? input.enums.plan
+        : fallback.enums.plan,
+      placement: Array.isArray(input.enums?.placement)
+        ? input.enums.placement
+        : fallback.enums.placement
+    },
+    defaults: {
+      plan:
+        typeof input.defaults?.plan === "string"
+          ? input.defaults.plan
+          : fallback.defaults.plan,
+      placements:
+        input.defaults?.placements &&
+        typeof input.defaults.placements === "object"
+          ? input.defaults.placements
+          : fallback.defaults.placements
+    }
+  };
+};
+
+const VENDOR_METADATA = normalizeMetadata(vendorMetadataRaw);
+const PLAN_ENUM = new Set(
+  (VENDOR_METADATA.enums.plan || []).map(value => value.trim().toLowerCase())
+);
+const PLACEMENT_ENUM = new Set(
+  (VENDOR_METADATA.enums.placement || []).map(value => value.trim().toLowerCase())
+);
+const DEFAULT_PLAN = VENDOR_METADATA.defaults.plan;
 
 const isSafeSlug = value => VENDOR_SLUG_REGEX.test(value);
+
+export const validateVendorMetadata = (metadata: VendorMetadata) => {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!metadata || typeof metadata !== "object") {
+    errors.push("metadata: invalid root object");
+    return { errors, warnings };
+  }
+
+  if (typeof metadata.version !== "number") {
+    errors.push("metadata.version: expected number");
+  }
+
+  if (typeof metadata.generatedAt !== "string") {
+    warnings.push("metadata.generatedAt: expected string");
+  }
+
+  if (!Array.isArray(metadata.enums?.plan) || metadata.enums.plan.length === 0) {
+    errors.push("metadata.enums.plan: expected non-empty array");
+  }
+
+  if (!Array.isArray(metadata.enums?.placement)) {
+    errors.push("metadata.enums.placement: expected array");
+  }
+
+  if (!metadata.defaults || typeof metadata.defaults !== "object") {
+    errors.push("metadata.defaults: expected object");
+  } else if (!metadata.enums.plan.includes(metadata.defaults.plan)) {
+    errors.push("metadata.defaults.plan: must be in enums.plan");
+  }
+
+  if (!metadata.vendors || typeof metadata.vendors !== "object") {
+    errors.push("metadata.vendors: expected object");
+  } else {
+    for (const [slug, entry] of Object.entries(metadata.vendors)) {
+      if (!isSafeSlug(slug)) {
+        warnings.push(`vendor.${slug}: invalid slug`);
+      }
+      if (entry.plan && !metadata.enums.plan.includes(entry.plan)) {
+        warnings.push(`vendor.${slug}: plan not in enums.plan`);
+      }
+      if (entry.placements) {
+        for (const placement of Object.keys(entry.placements)) {
+          if (!metadata.enums.placement.includes(placement)) {
+            warnings.push(
+              `vendor.${slug}: placement '${placement}' not in enums.placement`
+            );
+          }
+        }
+      }
+    }
+  }
+
+  return { errors, warnings };
+};
+
+const isDevRuntime =
+  (typeof process !== "undefined" &&
+    !!process.env &&
+    ["test", "development"].includes(process.env.NODE_ENV || "")) ||
+  (typeof process !== "undefined" && !!process.env?.VITEST);
+
+const metadataValidation = validateVendorMetadata(VENDOR_METADATA);
+if (metadataValidation.errors.length || metadataValidation.warnings.length) {
+  const message = [
+    ...metadataValidation.errors.map(item => `error:${item}`),
+    ...metadataValidation.warnings.map(item => `warn:${item}`)
+  ].join(" | ");
+  if (metadataValidation.errors.length && isDevRuntime) {
+    throw new Error(`vendor-metadata validation failed: ${message}`);
+  } else {
+    console.warn(`vendor-metadata validation: ${message}`);
+  }
+}
+
 
 const getAllowlist = value => {
   if (typeof value !== "string") return null;
@@ -119,13 +327,66 @@ const parseBoolFlag = value => {
   return normalized === "1" || normalized === "true" || normalized === "yes";
 };
 
+const normalizePlanValue = value => {
+  if (typeof value !== "string") return "";
+  const normalized = value.trim().toLowerCase();
+  return normalized;
+};
+
+const mapLegacyTier = tier => {
+  const t = normalizePlanValue(tier);
+  if (t === "spotlight") {
+    return { plan: "unknown", placements: ["spotlight"] };
+  }
+  if (t === "featured" || t === "basic" || t === "unpaid") {
+    return { plan: t, placements: [] };
+  }
+  return { plan: "", placements: [] };
+};
+
+export const getVendorMeta = slug => {
+  if (!slug || typeof slug !== "string") return null;
+  return VENDOR_METADATA.vendors[slug] || null;
+};
+
+export const getVendorPlan = slug => {
+  const meta = getVendorMeta(slug);
+  if (!meta) return "unknown";
+  const plan = normalizePlanValue(meta?.plan || DEFAULT_PLAN);
+  return PLAN_ENUM.has(plan) ? plan : DEFAULT_PLAN;
+};
+
+const isPlacementActive = (placement, today) => {
+  if (!placement || placement.active === false) return false;
+  if (placement.start && today < placement.start) return false;
+  if (placement.end && today > placement.end) return false;
+  return true;
+};
+
+export const getActivePlacements = (slug, today) => {
+  const meta = getVendorMeta(slug);
+  if (!meta) return [];
+  const date = today || new Date().toISOString().slice(0, 10);
+  const placements = {
+    ...VENDOR_METADATA.defaults.placements,
+    ...(meta?.placements || {})
+  };
+
+  return Object.entries(placements)
+    .filter(([placement, config]) => {
+      if (!PLACEMENT_ENUM.has(placement)) return false;
+      return isPlacementActive(config, date);
+    })
+    .map(([placement]) => placement);
+};
+
 const getVisitAllowlists = env => {
-  const vendorAllowlist = env ? getAllowlist(env.VENDOR_ALLOWLIST) : null;
   const pageAllowlist = env ? getAllowlist(env.VISIT_PAGE_ALLOWLIST) : null;
   return {
-    vendorAllowlist,
     pageAllowlist: pageAllowlist || DEFAULT_PAGE_ALLOWLIST,
-    tierAllowlist: TIER_ALLOWLIST
+    tierAllowlist: TIER_ALLOWLIST,
+    planAllowlist: ALLOWED_PLANS,
+    placementAllowlist: ALLOWED_PLACEMENTS
   };
 };
 
@@ -136,15 +397,26 @@ const validateVisitPayload = (input, allowlists) => {
     typeof input?.page === "string" ? input.page.trim() : "";
   const safeTier =
     typeof input?.tier === "string" ? input.tier.trim() : "";
+  const safePlan =
+    typeof input?.plan === "string" ? input.plan.trim() : "";
+  const normalizedTier = normalizePlanValue(safeTier);
+  const normalizedPlan = normalizePlanValue(safePlan);
+  const placements =
+    Array.isArray(input?.placements) && input.placements.length
+      ? input.placements
+          .map(item => (typeof item === "string" ? item.trim() : ""))
+          .filter(Boolean)
+      : [];
 
-  if (!safeVendor || !safePage || !safeTier) {
+  if (!safeVendor || !safePage || (!safeTier && !safePlan)) {
     return { ok: false, error: "Missing parameters" };
   }
 
   if (
     safeVendor.length > 64 ||
     safePage.length > 64 ||
-    safeTier.length > 32
+    (safeTier && safeTier.length > 32) ||
+    (safePlan && safePlan.length > 32)
   ) {
     return { ok: false, error: "Invalid parameters" };
   }
@@ -153,29 +425,80 @@ const validateVisitPayload = (input, allowlists) => {
     return { ok: false, error: "Invalid parameters" };
   }
 
-  if (allowlists.vendorAllowlist && !allowlists.vendorAllowlist.has(safeVendor)) {
-    return { ok: false, error: "Invalid vendor" };
-  }
-
   if (!allowlists.pageAllowlist.has(safePage)) {
     return { ok: false, error: "Invalid page" };
   }
 
-  if (!allowlists.tierAllowlist.has(safeTier)) {
+  if (safeTier && !allowlists.tierAllowlist.has(normalizedTier)) {
     return { ok: false, error: "Invalid tier" };
+  }
+
+  if (safePlan && !allowlists.planAllowlist.has(normalizedPlan)) {
+    return { ok: false, error: "Invalid plan" };
+  }
+
+  for (const placement of placements) {
+    if (!allowlists.placementAllowlist.has(normalizePlanValue(placement))) {
+      return { ok: false, error: "Invalid placement" };
+    }
   }
 
   return {
     ok: true,
     vendor: safeVendor,
     page: safePage,
-    tier: safeTier
+    tier: normalizedTier,
+    plan: normalizedPlan,
+    placements: placements.map(normalizePlanValue)
   };
 };
 
-export const buildVisitPayload = ({ vendor, page, tier }) => {
+const resolvePlanAndPlacements = (
+  validation,
+  vendorPlanHint?: string
+) => {
+  let plan = validation.plan;
+  const tier = validation.tier;
+  let placements = [...(validation.placements || [])];
+
+  if (!plan && tier) {
+    const mapped = mapLegacyTier(tier);
+    plan = mapped.plan;
+    placements.push(...mapped.placements);
+  }
+
+  if (!plan) {
+    return { ok: false, error: "Missing plan" };
+  }
+
+  const allowedPlanSet = new Set([...ALLOWED_PLANS, "unknown"]);
+  if (!allowedPlanSet.has(plan)) {
+    return { ok: false, error: "Invalid plan" };
+  }
+
+  placements = Array.from(
+    new Set(
+      placements.filter(p => ALLOWED_PLACEMENTS.has(p))
+    )
+  );
+
+  const legacyTier = tier || plan;
+
+  return { ok: true, plan, placements, legacyTier };
+};
+
+export const buildVisitPayload = ({
+  vendor,
+  page,
+  tier,
+  plan,
+  placements
+}) => {
   const allowlists = getVisitAllowlists();
-  const validation = validateVisitPayload({ vendor, page, tier }, allowlists);
+  const validation = validateVisitPayload(
+    { vendor, page, tier, plan, placements },
+    allowlists
+  );
   if (!validation.ok) {
     throw new Error(validation.error);
   }
@@ -191,6 +514,8 @@ export const buildVisitPayload = ({ vendor, page, tier }) => {
     vendor: validation.vendor,
     page: validation.page,
     tier: validation.tier,
+    plan: validation.plan,
+    placements: validation.placements,
     referrer,
     url
   };
@@ -257,7 +582,7 @@ export default {
           });
         }
 
-        if (!["website", "instagram"].includes(type)) {
+        if (!ALLOWED_CLICK_TYPES.has(type)) {
           return new Response("Invalid type", {
             status: 400,
             headers: clickCorsHeaders
@@ -298,7 +623,7 @@ export default {
       }
 
       // Click type allow-list
-      if (!["website", "instagram"].includes(type)) {
+      if (!ALLOWED_CLICK_TYPES.has(type)) {
         return new Response("Invalid type", { status: 400 });
       }
 
@@ -439,9 +764,44 @@ export default {
         });
       }
 
-      const { vendor, page, tier } = validation;
+      const { vendor, page } = validation;
+      const vendorMeta = getVendorMeta(vendor);
+      const vendorPlanHint =
+        vendorMeta && getVendorPlan(vendor) !== "unknown"
+          ? getVendorPlan(vendor)
+          : "";
+      const resolvedPlan = resolvePlanAndPlacements(
+        validation,
+        vendorPlanHint
+      );
+      if (!resolvedPlan.ok) {
+        return new Response(resolvedPlan.error, {
+          status: 400,
+          headers: corsHeaders
+        });
+      }
+
+      let { plan, placements, legacyTier } = resolvedPlan;
+
+      if (!vendorMeta) {
+        plan = "unknown";
+      }
+
+      const placementsActive = getActivePlacements(vendor);
+      let metaStatus = "ok";
+      if (!vendorMeta) {
+        metaStatus = "missing";
+        console.warn("visit:vendor-missing", { vendor, plan: plan });
+      } else if (legacyTier && vendorPlanHint && legacyTier !== vendorPlanHint) {
+        metaStatus = "mismatch";
+        console.warn("visit:vendor-plan-mismatch", {
+          vendor,
+          tier: legacyTier,
+          plan: vendorPlanHint
+        });
+      }
       if (env.DEBUG_VISITS === "1") {
-        console.log("visit", payload);
+        console.log("visit", { ...payload, plan, metaStatus });
       }
 
       const ip =
@@ -460,8 +820,20 @@ export default {
 
       await incrementCounter(env, `view:${vendor}:${date}`);
       await incrementCounter(env, `pview:${vendor}:${page}:${date}`);
-      await incrementCounter(env, `tview:${tier}:${date}`);
-      await incrementCounter(env, `tview:${vendor}:${tier}:${date}`);
+      await incrementCounter(env, `tview:${legacyTier}:${date}`);
+      await incrementCounter(env, `tview:${vendor}:${legacyTier}:${date}`);
+      await incrementCounter(env, `planview:${plan}:${date}`);
+      await incrementCounter(env, `planview:${vendor}:${plan}:${date}`);
+
+      const placementUnion = new Set([
+        ...placements,
+        ...placementsActive
+      ]);
+
+      for (const placement of placementUnion) {
+        await incrementCounter(env, `plcview:${placement}:${date}`);
+        await incrementCounter(env, `plcview:${vendor}:${placement}:${date}`);
+      }
 
       const referrerValue =
         typeof payload.referrer === "string" ? payload.referrer : "";
@@ -503,6 +875,72 @@ export default {
     }
 
     /* ----------------------------
+       CONTRACT DISCOVERY (PUBLIC)
+       ---------------------------- */
+    if (url.pathname === "/schema") {
+      const corsHeaders = getExportCorsHeaders(request);
+
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", {
+          status: 405,
+          headers: { Allow: "GET, OPTIONS", ...corsHeaders }
+        });
+      }
+
+      const resolved = {
+        ...CONTRACT,
+        resolved: {
+          vendorSlugRegex: VENDOR_SLUG_REGEX.source,
+          allowedPages: Array.from(ALLOWED_PAGES),
+          allowedPlans: Array.from(ALLOWED_PLANS),
+          allowedPlacements: Array.from(ALLOWED_PLACEMENTS),
+          allowedClickTypes: Array.from(ALLOWED_CLICK_TYPES),
+          internalDomains: Array.from(INTERNAL_REFERRER_DOMAINS),
+          visitAllowedOrigins: Array.from(VISIT_ALLOWED_ORIGINS),
+          exportAllowedOrigins: Array.from(EXPORT_ALLOWED_ORIGINS),
+          defaultRanges: CONTRACT.defaultRanges || []
+        }
+      };
+
+      return new Response(JSON.stringify(resolved), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "public, max-age=3600",
+          ...corsHeaders
+        }
+      });
+    }
+
+    if (url.pathname === "/openapi") {
+      const corsHeaders = getExportCorsHeaders(request);
+
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", {
+          status: 405,
+          headers: { Allow: "GET, OPTIONS", ...corsHeaders }
+        });
+      }
+
+      return new Response(OPENAPI_YAML, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/yaml; charset=utf-8",
+          "Cache-Control": "public, max-age=3600",
+          ...corsHeaders
+        }
+      });
+    }
+
+    /* ----------------------------
        STATS API (AUTHENTICATED)
        ---------------------------- */
     if (url.pathname === "/api/stats") {
@@ -525,7 +963,7 @@ export default {
         return new Response("Missing site", { status: 400 });
       }
 
-      const rangeDays = { "7d": 7, "28d": 28, "90d": 90 }[range];
+      const rangeDays = getRangeDays(range);
       if (!rangeDays) {
         return new Response("Invalid range", { status: 400 });
       }
@@ -544,6 +982,7 @@ export default {
       const uniqueAgg = {};
       const pageAgg = {};
       const refAgg = {};
+      const vendorTierSeen = {};
       const tierViews = Object.fromEntries(
         Array.from(TIER_ALLOWLIST).map(tier => [tier, 0])
       );
@@ -581,7 +1020,23 @@ export default {
             continue;
           }
 
-          if (parts[0] === "tview") {
+          if (parts[0] === "tview" && parts.length === 4) {
+            const [, vendor, tier, date] = parts;
+            if (!(date in dailyViews)) continue;
+            if (!vendorTierSeen[vendor]) vendorTierSeen[vendor] = new Set();
+            vendorTierSeen[vendor].add(tier);
+            continue;
+          }
+
+          if (
+            parts[0] === "planview" ||
+            parts[0] === "plcview" ||
+            parts[0] === "tview"
+          ) {
+            continue;
+          }
+
+          if (parts[0] === "pview" && parts.length === 3) {
             continue;
           }
 
@@ -646,7 +1101,7 @@ export default {
           if (parts.length !== 3) continue;
 
           const [vendor, type, date] = parts;
-          if (!["website", "instagram"].includes(type)) continue;
+          if (!ALLOWED_CLICK_TYPES.has(type)) continue;
           if (!(date in dailyTotals)) continue;
 
           const value = parseInt(await env.CLICKS.get(key.name)) || 0;
@@ -678,6 +1133,29 @@ export default {
         };
         const pages = pageAgg[vendor] || {};
         const refs = refAgg[vendor] || { internal: {}, external: {} };
+        const vendorMeta = getVendorMeta(vendor);
+        const plan = getVendorPlan(vendor);
+        const placementsActive = vendorMeta ? getActivePlacements(vendor) : [];
+        let metaStatus = "missing";
+        if (vendorMeta) {
+          metaStatus = "ok";
+          const seen = vendorTierSeen[vendor];
+          if (seen) {
+            for (const tier of seen) {
+              if (tier !== plan) {
+                metaStatus = "mismatch";
+                console.warn("stats:vendor-plan-mismatch", {
+                  vendor,
+                  plan,
+                  tier
+                });
+                break;
+              }
+            }
+          }
+        } else {
+          console.warn("stats:vendor-missing", { vendor });
+        }
 
         const topInternal = Object.entries(refs.internal)
           .sort((a, b) => b[1] - a[1])
@@ -695,6 +1173,9 @@ export default {
 
         return {
           vendor,
+          plan,
+          placementsActive,
+          metaStatus,
           website: clickCounts.website,
           instagram: clickCounts.instagram,
           views: viewAgg[vendor] || 0,
@@ -724,6 +1205,7 @@ export default {
         JSON.stringify({
           site,
           range,
+          contractVersion: CONTRACT_VERSION,
           generatedAt: new Date().toISOString(),
           vendors,
           daily,
@@ -773,7 +1255,7 @@ export default {
         return new Response("Invalid vendor", { status: 400, headers: corsHeaders });
       }
 
-      const rangeDays = { "7d": 7, "28d": 28, "90d": 90 }[range];
+      const rangeDays = getRangeDays(range);
       if (!rangeDays) {
         return new Response("Invalid range", { status: 400, headers: corsHeaders });
       }
@@ -982,6 +1464,26 @@ export default {
             date = viewDate;
             const month = date.slice(0, 7);
             monthlyKey = `rollup:tview:${vendor}:${tier}:${month}`;
+          } else if (parts[0] === "planview" && parts.length === 3) {
+            const [, plan, viewDate] = parts;
+            date = viewDate;
+            const month = date.slice(0, 7);
+            monthlyKey = `rollup:planview:${plan}:${month}`;
+          } else if (parts[0] === "planview" && parts.length === 4) {
+            const [, vendor, plan, viewDate] = parts;
+            date = viewDate;
+            const month = date.slice(0, 7);
+            monthlyKey = `rollup:planview:${vendor}:${plan}:${month}`;
+          } else if (parts[0] === "plcview" && parts.length === 3) {
+            const [, placement, viewDate] = parts;
+            date = viewDate;
+            const month = date.slice(0, 7);
+            monthlyKey = `rollup:plcview:${placement}:${month}`;
+          } else if (parts[0] === "plcview" && parts.length === 4) {
+            const [, vendor, placement, viewDate] = parts;
+            date = viewDate;
+            const month = date.slice(0, 7);
+            monthlyKey = `rollup:plcview:${vendor}:${placement}:${month}`;
           } else if (parts[0] === "view" && parts.length === 3) {
             const [, vendor, viewDate] = parts;
             date = viewDate;
@@ -992,11 +1494,20 @@ export default {
             date = viewDate;
             const month = date.slice(0, 7);
             monthlyKey = `rollup:uview:${vendor}:${month}`;
+          } else if (parts[0] === "pview" && parts.length === 3) {
+            const [, plan, viewDate] = parts;
+            date = viewDate;
+            const month = date.slice(0, 7);
+            monthlyKey = `rollup:pview:${plan}:${month}`;
           } else if (parts[0] === "pview" && parts.length === 4) {
             const [, vendor, page, viewDate] = parts;
             date = viewDate;
             const month = date.slice(0, 7);
-            monthlyKey = `rollup:pview:${vendor}:${page}:${month}`;
+            if (PLAN_ENUM.has(page)) {
+              monthlyKey = `rollup:pview:${vendor}:${page}:${month}`;
+            } else {
+              monthlyKey = `rollup:pview:${vendor}:${page}:${month}`;
+            }
           } else if (parts[0] === "ref" && parts.length === 5) {
             const [, vendor, scope, bucket, refDate] = parts;
             date = refDate;

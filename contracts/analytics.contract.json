@@ -1,0 +1,27 @@
+{
+  "apiVersion": "1.0.0",
+  "allowedPages": [
+    "profile",
+    "spotlight",
+    "featured",
+    "basic",
+    "unpaid",
+    "article"
+  ],
+  "allowedPlans": ["unpaid", "basic", "featured"],
+  "allowedPlacements": ["spotlight", "editor_pick", "home_feature"],
+  "allowedClickTypes": ["website", "instagram"],
+  "internalDomains": ["startmyloveengine.com", "go.startmyloveengine.com"],
+  "vendorSlugRegex": "^[a-z0-9-]+$",
+  "defaultRanges": ["7d", "28d", "90d"],
+  "cors": {
+    "visitAllowedOrigins": [
+      "https://startmyloveengine.com",
+      "https://www.startmyloveengine.com"
+    ],
+    "exportAllowedOrigins": [
+      "https://startmyloveengine.com",
+      "https://www.startmyloveengine.com"
+    ]
+  }
+}

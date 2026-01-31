@@ -6,6 +6,7 @@
   "scripts": {
     "sync:analytics-config": "node scripts/sync-analytics-config.js",
     "predeploy": "npm run sync:analytics-config && bash scripts/predeploy-check.sh",
+    "smoke": "bash scripts/smoke-check.sh",
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "wrangler dev",

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "generatedAt": "2026-01-31T00:00:00.000Z",
+  "vendors": {
+    "test-vendor": {
+      "plan": "featured",
+      "placements": {
+        "spotlight": { "active": true }
+      }
+    },
+    "vendor-a": {
+      "plan": "featured",
+      "placements": {
+        "spotlight": { "start": "2026-02-01", "end": "2026-02-28" }
+      }
+    },
+    "vendor-b": { "plan": "featured" },
+    "vendor-csv": { "plan": "featured" },
+    "vendor-basic": {
+      "plan": "basic",
+      "placements": {
+        "featured-list": { "active": true }
+      }
+    },
+    "dave-blake": { "plan": "featured" }
+  },
+  "enums": {
+    "plan": ["unpaid", "basic", "featured"],
+    "placement": ["spotlight", "featured-list", "home", "search"]
+  },
+  "defaults": {
+    "plan": "unpaid",
+    "placements": {}
+  }
+}

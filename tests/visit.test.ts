@@ -50,6 +50,37 @@ test("increments tier view counters on visit", async () => {
   expect(response.status).toBe(204);
   expect(await CLICKS.get(`tview:featured:${today}`)).toBe("1");
   expect(await CLICKS.get(`tview:test-vendor:featured:${today}`)).toBe("1");
+  expect(await CLICKS.get(`planview:featured:${today}`)).toBe("1");
+  expect(await CLICKS.get(`planview:test-vendor:featured:${today}`)).toBe("1");
+});
+
+test("accepts unknown vendor and assigns unknown plan", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const payload = {
+    vendor: "unknown-vendor",
+    page: "profile",
+    tier: "basic",
+    referrer: "https://startmyloveengine.com/spotlight",
+    url: "https://startmyloveengine.com/vendors/unknown-vendor"
+  };
+
+  const request = new Request("https://example.com/visit", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.11",
+      "user-agent": "test-agent"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const env = { CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(204);
+  expect(await CLICKS.get(`view:unknown-vendor:${today}`)).toBe("1");
+  expect(await CLICKS.get(`planview:unknown:${today}`)).toBe("1");
+  expect(await CLICKS.get(`planview:unknown-vendor:unknown:${today}`)).toBe("1");
 });
 
 test("returns CORS headers on /visit preflight", async () => {

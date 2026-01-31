@@ -166,6 +166,23 @@ describe("scheduled rollup (daily -> monthly)", () => {
     expect(await CLICKS.get(`tview:vendor-z:featured:${oldDate}`)).toBeNull();
   });
 
+  test("rolls up plan view counters", async () => {
+    const oldDate = "2025-11-06";
+    const month = "2025-11";
+
+    await CLICKS.put(`planview:featured:${oldDate}`, "4");
+    await CLICKS.put(`planview:vendor-z:featured:${oldDate}`, "2");
+
+    const env = { CLICKS, CRON_NOW: cronNow } as any;
+
+    await worker.scheduled({} as any, env);
+
+    expect(await getNum(CLICKS, `rollup:planview:featured:${month}`)).toBe(4);
+    expect(await getNum(CLICKS, `rollup:planview:vendor-z:featured:${month}`)).toBe(2);
+    expect(await CLICKS.get(`planview:featured:${oldDate}`)).toBeNull();
+    expect(await CLICKS.get(`planview:vendor-z:featured:${oldDate}`)).toBeNull();
+  });
+
   test("archives daily keys before deletion when archive KV is present", async () => {
     await CLICKS.put("vendor-g:website:2025-10-03", "8");
 

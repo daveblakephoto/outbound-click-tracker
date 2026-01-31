@@ -45,6 +45,9 @@ test("returns current stats", async () => {
 
   const json = await response.json();
   expect(json.vendors.length).toBeGreaterThan(0);
+  const vendor = json.vendors.find((row: any) => row.vendor === "test-vendor");
+  expect(vendor.plan).toBe("featured");
+  expect(Array.isArray(vendor.placementsActive)).toBe(true);
 });
 
 test("rejects non-GET requests", async () => {
@@ -118,4 +121,84 @@ test("returns tier views", async () => {
   expect(json.tierViews.featured).toBe(2);
   expect(json.tierViews.basic).toBe(0);
   expect(json.tierViews.unpaid).toBe(0);
+});
+
+test("returns metaStatus for vendors", async () => {
+  const request = new Request("https://example.com/visit", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.12",
+      "user-agent": "test-agent"
+    },
+    body: JSON.stringify({
+      vendor: "unknown-vendor",
+      page: "profile",
+      tier: "basic"
+    })
+  });
+
+  const env = {
+    CLICKS,
+    ANALYTICS_API_TOKEN: "test-secret"
+  } as any;
+
+  await worker.fetch(request, env);
+
+  await worker.fetch(
+    new Request("https://example.com/visit", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "cf-connecting-ip": "203.0.113.13",
+        "user-agent": "test-agent"
+      },
+      body: JSON.stringify({
+        vendor: "vendor-basic",
+        page: "profile",
+        tier: "basic"
+      })
+    }),
+    env
+  );
+
+  await worker.fetch(
+    new Request("https://example.com/visit", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "cf-connecting-ip": "203.0.113.14",
+        "user-agent": "test-agent"
+      },
+      body: JSON.stringify({
+        vendor: "test-vendor",
+        page: "profile",
+        tier: "basic"
+      })
+    }),
+    env
+  );
+
+  const statsRequest = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
+    {
+      headers: { Authorization: "Bearer test-secret" }
+    }
+  );
+
+  const response = await worker.fetch(statsRequest, env);
+  const json = await response.json();
+
+  const unknown = json.vendors.find((row: any) => row.vendor === "unknown-vendor");
+  const ok = json.vendors.find((row: any) => row.vendor === "vendor-basic");
+  const mismatch = json.vendors.find((row: any) => row.vendor === "test-vendor");
+
+  expect(unknown.plan).toBe("unknown");
+  expect(unknown.metaStatus).toBe("missing");
+
+  expect(ok.plan).toBe("basic");
+  expect(ok.metaStatus).toBe("ok");
+
+  expect(mismatch.plan).toBe("featured");
+  expect(mismatch.metaStatus).toBe("mismatch");
 });
