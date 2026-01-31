@@ -123,6 +123,33 @@ test("returns tier views", async () => {
   expect(json.tierViews.unpaid).toBe(0);
 });
 
+test("returns placement counts per vendor", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  await CLICKS.put(`plcview:vendor-basic:spotlight:${today}`, "3");
+  await CLICKS.put(`plcview:vendor-basic:editor_pick:${today}`, "1");
+
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
+    {
+      headers: { Authorization: "Bearer test-secret" }
+    }
+  );
+
+  const env = {
+    CLICKS,
+    ANALYTICS_API_TOKEN: "test-secret"
+  } as any;
+
+  const response = await worker.fetch(request, env);
+  const json = await response.json();
+
+  const vendor = json.vendors.find((row: any) => row.vendor === "vendor-basic");
+  expect(vendor.placements).toEqual([
+    { placement: "spotlight", count: 3 },
+    { placement: "editor_pick", count: 1 }
+  ]);
+});
+
 test("returns metaStatus for vendors", async () => {
   const request = new Request("https://example.com/visit", {
     method: "POST",

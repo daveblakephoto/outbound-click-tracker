@@ -983,6 +983,7 @@ export default {
       const pageAgg = {};
       const refAgg = {};
       const vendorTierSeen = {};
+      const placementAgg = {};
       const tierViews = Object.fromEntries(
         Array.from(TIER_ALLOWLIST).map(tier => [tier, 0])
       );
@@ -1030,9 +1031,21 @@ export default {
 
           if (
             parts[0] === "planview" ||
-            parts[0] === "plcview" ||
             parts[0] === "tview"
           ) {
+            continue;
+          }
+
+          if (parts[0] === "plcview" && parts.length === 4) {
+            const [, vendor, placement, date] = parts;
+            if (!(date in dailyViews)) continue;
+
+            const value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            if (!value) continue;
+
+            if (!placementAgg[vendor]) placementAgg[vendor] = {};
+            placementAgg[vendor][placement] =
+              (placementAgg[vendor][placement] || 0) + value;
             continue;
           }
 
@@ -1123,7 +1136,8 @@ export default {
         ...Object.keys(viewAgg),
         ...Object.keys(uniqueAgg),
         ...Object.keys(pageAgg),
-        ...Object.keys(refAgg)
+        ...Object.keys(refAgg),
+        ...Object.keys(placementAgg)
       ]);
 
       const vendors = Array.from(vendorsSet).map(vendor => {
@@ -1136,6 +1150,9 @@ export default {
         const vendorMeta = getVendorMeta(vendor);
         const plan = getVendorPlan(vendor);
         const placementsActive = vendorMeta ? getActivePlacements(vendor) : [];
+        const placementsCounts = Object.entries(placementAgg[vendor] || {})
+          .sort((a, b) => b[1] - a[1])
+          .map(([placement, count]) => ({ placement, count }));
         let metaStatus = "missing";
         if (vendorMeta) {
           metaStatus = "ok";
@@ -1175,6 +1192,7 @@ export default {
           vendor,
           plan,
           placementsActive,
+          placements: placementsCounts,
           metaStatus,
           website: clickCounts.website,
           instagram: clickCounts.instagram,

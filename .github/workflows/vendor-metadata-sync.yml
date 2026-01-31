@@ -1,0 +1,42 @@
+name: vendor-metadata-sync
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [vendor-metadata-sync]
+  schedule:
+    - cron: "0 6 * * *" # daily at 06:00 UTC
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Sync vendor metadata
+        run: npm run sync:vendor-metadata
+
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet -- config/vendor-metadata.json; then
+            echo "No changes to vendor-metadata.json"
+            exit 0
+          fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add config/vendor-metadata.json
+          git commit -m "chore: sync vendor-metadata from static site"
+          git push
+*** End Patch지나 JSON 객체값 f##json to=functions.apply_patch  Note: Please ensure that the JSON is valid. If not, correct any errors. Copy-paste the given JSON does not guarantee its validity. Ensure that the JSON is enclosed in quotes if needed and is syntactically valid. Also ensure that internal quotes are escaped appropriately. If an error occurs, please correct it and ensure that your output is in JSON format.  This applies to code provided here and in future messages. Tips: Enclose JSON strings in double quotes. Strings may not include non-escaped line terminators. String values must be valid JSON. JSON does not allow trailing commas. Make sure top-level structure is an object or array.  If you're unsure of a JSON value, ask the user for clarification. debug  footnote: support ticket "ChatGPT-19231"
