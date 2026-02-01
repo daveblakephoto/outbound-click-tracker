@@ -944,6 +944,18 @@ export default {
        STATS API (AUTHENTICATED)
        ---------------------------- */
     if (url.pathname === "/api/stats") {
+      const statsTimingEnabled = env.DEBUG_STATS === "1";
+      const statsStart = statsTimingEnabled ? performance.now() : 0;
+      const statsRay = statsTimingEnabled
+        ? request.headers.get("cf-ray")
+        : null;
+      let statsListMs = 0;
+      let statsGetMs = 0;
+      let statsSerializeMs = 0;
+      let statsListCalls = 0;
+      let statsGetCalls = 0;
+      let statsKeysSeen = 0;
+
       if (request.method !== "GET") {
         return new Response("Method not allowed", {
           status: 405,
@@ -1000,9 +1012,18 @@ export default {
 
       let cursor;
       do {
-        const list = await env.CLICKS.list({ cursor });
+        let list;
+        if (statsTimingEnabled) {
+          const listStart = performance.now();
+          list = await env.CLICKS.list({ cursor });
+          statsListMs += performance.now() - listStart;
+          statsListCalls += 1;
+        } else {
+          list = await env.CLICKS.list({ cursor });
+        }
 
         for (const key of list.keys) {
+          statsKeysSeen += 1;
           const parts = key.name.split(":");
           if (parts[0] === "rollup") continue;
           if (parts[0] === "rl" || parts[0] === "uviewlock") continue;
@@ -1012,7 +1033,15 @@ export default {
             const [, tier, date] = parts;
             if (!(date in dailyViews)) continue;
 
-            const value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            let value;
+            if (statsTimingEnabled) {
+              const getStart = performance.now();
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+              statsGetMs += performance.now() - getStart;
+              statsGetCalls += 1;
+            } else {
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            }
             if (!value) continue;
 
             if (tierViews[tier] !== undefined) {
@@ -1040,7 +1069,15 @@ export default {
             const [, vendor, placement, date] = parts;
             if (!(date in dailyViews)) continue;
 
-            const value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            let value;
+            if (statsTimingEnabled) {
+              const getStart = performance.now();
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+              statsGetMs += performance.now() - getStart;
+              statsGetCalls += 1;
+            } else {
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            }
             if (!value) continue;
 
             if (!placementAgg[vendor]) placementAgg[vendor] = {};
@@ -1057,7 +1094,15 @@ export default {
             const [, vendor, date] = parts;
             if (!(date in dailyViews)) continue;
 
-            const value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            let value;
+            if (statsTimingEnabled) {
+              const getStart = performance.now();
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+              statsGetMs += performance.now() - getStart;
+              statsGetCalls += 1;
+            } else {
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            }
             if (!value) continue;
 
             viewAgg[vendor] = (viewAgg[vendor] || 0) + value;
@@ -1069,7 +1114,15 @@ export default {
             const [, vendor, date] = parts;
             if (!(date in dailyUniqueViews)) continue;
 
-            const value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            let value;
+            if (statsTimingEnabled) {
+              const getStart = performance.now();
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+              statsGetMs += performance.now() - getStart;
+              statsGetCalls += 1;
+            } else {
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            }
             if (!value) continue;
 
             uniqueAgg[vendor] = (uniqueAgg[vendor] || 0) + value;
@@ -1081,7 +1134,15 @@ export default {
             const [, vendor, page, date] = parts;
             if (!(date in dailyViews)) continue;
 
-            const value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            let value;
+            if (statsTimingEnabled) {
+              const getStart = performance.now();
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+              statsGetMs += performance.now() - getStart;
+              statsGetCalls += 1;
+            } else {
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            }
             if (!value) continue;
 
             if (!pageAgg[vendor]) pageAgg[vendor] = {};
@@ -1094,7 +1155,15 @@ export default {
             const [, vendor, scope, bucket, date] = parts;
             if (!(date in dailyViews)) continue;
 
-            const value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            let value;
+            if (statsTimingEnabled) {
+              const getStart = performance.now();
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+              statsGetMs += performance.now() - getStart;
+              statsGetCalls += 1;
+            } else {
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            }
             if (!value) continue;
 
             if (!refAgg[vendor]) {
@@ -1117,7 +1186,15 @@ export default {
           if (!ALLOWED_CLICK_TYPES.has(type)) continue;
           if (!(date in dailyTotals)) continue;
 
-          const value = parseInt(await env.CLICKS.get(key.name)) || 0;
+          let value;
+          if (statsTimingEnabled) {
+            const getStart = performance.now();
+            value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            statsGetMs += performance.now() - getStart;
+            statsGetCalls += 1;
+          } else {
+            value = parseInt(await env.CLICKS.get(key.name)) || 0;
+          }
           if (!value) continue;
 
           if (!vendorAgg[vendor]) {
@@ -1219,25 +1296,59 @@ export default {
         total: dailyUniqueViews[date] || 0
       }));
 
-      return new Response(
-        JSON.stringify({
+      const payload = {
+        site,
+        range,
+        contractVersion: CONTRACT_VERSION,
+        generatedAt: new Date().toISOString(),
+        vendors,
+        daily,
+        dailyViews: dailyViewTotals,
+        dailyUniqueViews: dailyUniqueViewTotals,
+        tierViews
+      };
+      let body;
+      if (statsTimingEnabled) {
+        const serializeStart = performance.now();
+        body = JSON.stringify(payload);
+        statsSerializeMs = performance.now() - serializeStart;
+      } else {
+        body = JSON.stringify(payload);
+      }
+      let statsTimingHeader = "";
+      if (statsTimingEnabled) {
+        const totalMs = performance.now() - statsStart;
+        const listMsRounded = Math.round(statsListMs);
+        const getMsRounded = Math.round(statsGetMs);
+        const serializeMsRounded = Math.round(statsSerializeMs);
+        const totalMsRounded = Math.round(totalMs);
+        statsTimingHeader = [
+          `list;dur=${listMsRounded}`,
+          `get;dur=${getMsRounded}`,
+          `serialize;dur=${serializeMsRounded}`,
+          `total;dur=${totalMsRounded}`
+        ].join(", ");
+        console.log("stats:timing", {
           site,
           range,
-          contractVersion: CONTRACT_VERSION,
-          generatedAt: new Date().toISOString(),
-          vendors,
-          daily,
-          dailyViews: dailyViewTotals,
-          dailyUniqueViews: dailyUniqueViewTotals,
-          tierViews
-        }),
-        {
-          headers: {
-            "Content-Type": "application/json",
-            "Cache-Control": "no-store"
-          }
-        }
-      );
+          cfRay: statsRay,
+          listCalls: statsListCalls,
+          listMs: listMsRounded,
+          getCalls: statsGetCalls,
+          getMs: getMsRounded,
+          keysSeen: statsKeysSeen,
+          serializeMs: serializeMsRounded,
+          totalMs: totalMsRounded
+        });
+      }
+      const responseHeaders = {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store"
+      };
+      if (statsTimingHeader) {
+        responseHeaders["Server-Timing"] = statsTimingHeader;
+      }
+      return new Response(body, { headers: responseHeaders });
     }
 
     /* ----------------------------
