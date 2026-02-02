@@ -96,3 +96,46 @@ test("export response caches when enabled", async () => {
   expect(second.status).toBe(200);
   expect(second.headers.get("X-Cache")).toBe("HIT");
 });
+
+test("cache keys are scoped by auth token", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  await CLICKS.put(`dave-blake:website:${today}`, "1");
+
+  const envA = {
+    CLICKS,
+    ANALYTICS_API_TOKEN: "token-a",
+    ANALYTICS_CACHE: "1"
+  } as any;
+
+  const envB = {
+    CLICKS,
+    ANALYTICS_API_TOKEN: "token-b",
+    ANALYTICS_CACHE: "1"
+  } as any;
+
+  const requestA = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
+    {
+      headers: { Authorization: "Bearer token-a" }
+    }
+  );
+
+  const requestB = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
+    {
+      headers: { Authorization: "Bearer token-b" }
+    }
+  );
+
+  const first = await worker.fetch(requestA, envA);
+  expect(first.status).toBe(200);
+  expect(first.headers.get("X-Cache")).toBe("MISS");
+
+  const second = await worker.fetch(requestB, envB);
+  expect(second.status).toBe(200);
+  expect(second.headers.get("X-Cache")).toBe("MISS");
+
+  const third = await worker.fetch(requestB, envB);
+  expect(third.status).toBe(200);
+  expect(third.headers.get("X-Cache")).toBe("HIT");
+});

@@ -34,6 +34,10 @@ test("/schema exposes contract fields", async () => {
   expect(json.apiVersion).toBe("1.0.0");
   expect(json.allowedPages).toContain("profile");
   expect(json.resolved.vendorSlugRegex).toBe("^[a-z0-9-]+$");
+  expect(json.responses.stats.dataSource).toContain("cache");
+  expect(json.responses.stats.dataWarning).toBe("string");
+  expect(json.responses.health.status).toContain("ok");
+  expect(json.diagnostics.healthEndpoint).toBe("/api/health/analytics-engine");
 });
 
 test("legacy tier payload maps to plan and placement", async () => {
@@ -108,4 +112,5 @@ test("/openapi returns yaml content", async () => {
   const text = await res.text();
   expect(text).toContain("/visit:");
   expect(text).toContain("StartMyLoveEngine Analytics API");
+  expect(text).toContain("/api/health/analytics-engine");
 });

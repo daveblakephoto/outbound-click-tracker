@@ -13,7 +13,10 @@ Fast, local, deterministic tests for a Cloudflare Workers click tracker using Vi
 
 - Update `wrangler.toml` with your real KV namespace IDs.
 - Set `ANALYTICS_API_TOKEN` as a Wrangler secret for `/api/stats` auth.
-- Optional env vars: `CLICK_SIGNING_SECRET`, `RATE_LIMIT_PER_MINUTE`, `VENDOR_ALLOWLIST`, `VISIT_PAGE_ALLOWLIST`, `CRON_DRY_RUN`, `CRON_MAX_KEYS`.
+- Optional env vars: `CLICK_SIGNING_SECRET`, `RATE_LIMIT_PER_MINUTE`, `ANALYTICS_CACHE`, `VENDOR_ALLOWLIST`, `VISIT_PAGE_ALLOWLIST`, `CRON_DRY_RUN`, `CRON_MAX_KEYS`.
+- Abuse protection: rate limiting is enabled by default at **60 requests/minute per IP**. Set `RATE_LIMIT_PER_MINUTE=0` to disable.
+- Click signing: when `CLICK_SIGNING_SECRET` is set, `GET /click` requires `sig` (HMAC SHA-256 of `vendor|type|to`).
+- Cache scoping: when `ANALYTICS_CACHE=1`, cache keys include a hash of the Authorization token.
 - Cron rollup keeps daily keys for the current month and the previous two months, then rolls older days into monthly keys (`rollup:vendor:type:YYYY-MM`).
 - Tests can force cron time via `CRON_NOW` (ISO timestamp) passed to `scheduled()` for deterministic rollup behavior.
 - Optional R2 snapshots write monthly CSVs to `CLICKS_SNAPSHOTS` under `smle/snapshots/YYYY-MM/` plus raw key snapshots under `smle/snapshots-raw/YYYY-MM/`.
@@ -24,6 +27,7 @@ Fast, local, deterministic tests for a Cloudflare Workers click tracker using Vi
 - Runtime discovery:
   - `GET /schema` — returns contract JSON plus resolved/normalized allowlists (cached 1h).
   - `GET /openapi` — returns OpenAPI YAML (cached 1h).
+  - `GET /api/health/analytics-engine` — auth-protected AE probe (no-store).
 - Producers (startmyloveengine site) should import the contract at build time; consumers (mocha dashboard) may cache `/schema` for up to 1h.
 - Change policy: additive-only within a minor version; breaking changes require a major bump and a deprecation window.
 

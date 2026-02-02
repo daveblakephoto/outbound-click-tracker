@@ -52,6 +52,41 @@ test("returns current stats", async () => {
   expect(Array.isArray(vendor.placementsActive)).toBe(true);
 });
 
+test("clamps unique views to total views", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  await CLICKS.put(`view:dave-blake:${today}`, "2");
+  await CLICKS.put(`uview:dave-blake:${today}`, "5");
+
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
+    {
+      headers: { Authorization: "Bearer test-secret" }
+    }
+  );
+
+  const env = {
+    CLICKS,
+    ANALYTICS_API_TOKEN: "test-secret"
+  } as any;
+
+  const response = await worker.fetch(request, env);
+  expect(response.status).toBe(200);
+
+  const json = await response.json();
+  const vendor = json.vendors.find((row: any) => row.vendor === "dave-blake");
+  expect(vendor.views).toBe(2);
+  expect(vendor.uniqueViews).toBe(2);
+
+  const dailyViews = json.dailyViews.find(
+    (row: any) => row.date === today
+  );
+  const dailyUnique = json.dailyUniqueViews.find(
+    (row: any) => row.date === today
+  );
+  expect(dailyViews.total).toBe(2);
+  expect(dailyUnique.total).toBe(2);
+});
+
 test("rejects non-GET requests", async () => {
   const request = new Request(
     "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",

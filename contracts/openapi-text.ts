@@ -119,6 +119,22 @@ paths:
       responses:
         "200":
           description: stats json
+          headers:
+            X-Data-Source:
+              schema:
+                type: string
+                enum: [ae, kv, cache]
+            X-Data-Warning:
+              schema:
+                type: string
+            X-Cache:
+              schema:
+                type: string
+                enum: [HIT, MISS]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsResponse"
         "401":
           description: auth failed
   /api/export/vendor.csv:
@@ -144,12 +160,40 @@ paths:
       responses:
         "200":
           description: CSV payload
+          headers:
+            X-Data-Source:
+              schema:
+                type: string
+                enum: [ae, kv, cache]
+            X-Data-Warning:
+              schema:
+                type: string
+            X-Cache:
+              schema:
+                type: string
+                enum: [HIT, MISS]
           content:
             text/csv:
               schema:
                 type: string
         "401":
           description: auth failed
+  /api/health/analytics-engine:
+    get:
+      summary: Analytics Engine health probe
+      responses:
+        "200":
+          description: healthy analytics engine
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: degraded analytics engine
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
   /schema:
     get:
       summary: Analytics contract schema
@@ -163,6 +207,32 @@ paths:
         "200":
           description: OpenAPI yaml
 components:
+  schemas:
+    StatsResponse:
+      type: object
+      properties:
+        dataSource:
+          type: string
+          enum: [ae, kv, cache]
+        dataWarning:
+          type: string
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - latencyMs
+        - checkedAt
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        latencyMs:
+          type: number
+        lastError:
+          type: string
+        checkedAt:
+          type: string
+          format: date-time
   securitySchemes:
     bearerAuth:
       type: http

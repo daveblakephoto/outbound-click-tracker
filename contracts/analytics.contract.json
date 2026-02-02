@@ -23,5 +23,28 @@
       "https://startmyloveengine.com",
       "https://www.startmyloveengine.com"
     ]
+  },
+  "responses": {
+    "stats": {
+      "dataSource": ["ae", "kv", "cache"],
+      "dataWarning": "string"
+    },
+    "export": {
+      "headers": {
+        "dataSource": "X-Data-Source",
+        "dataWarning": "X-Data-Warning",
+        "cache": "X-Cache"
+      }
+    },
+    "health": {
+      "status": ["ok", "degraded"],
+      "fields": ["latencyMs", "lastError", "checkedAt"]
+    }
+  },
+  "diagnostics": {
+    "dataSourceHeader": "X-Data-Source",
+    "dataWarningHeader": "X-Data-Warning",
+    "cacheHeader": "X-Cache",
+    "healthEndpoint": "/api/health/analytics-engine"
   }
 }

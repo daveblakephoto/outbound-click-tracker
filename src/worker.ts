@@ -436,6 +436,20 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     dailyUniqueViews[date] += count;
   }
 
+  for (const [vendor, uniques] of Object.entries(uniqueAgg)) {
+    const views = viewAgg[vendor] || 0;
+    if (uniques > views) {
+      uniqueAgg[vendor] = views;
+    }
+  }
+
+  for (const [date, uniques] of Object.entries(dailyUniqueViews)) {
+    const views = dailyViews[date] || 0;
+    if (uniques > views) {
+      dailyUniqueViews[date] = views;
+    }
+  }
+
   for (const row of placementRows) {
     const vendor = String(row.vendor || "").trim();
     const placement = String(row.placement || "").trim();
@@ -808,6 +822,11 @@ const getCacheControlValue = (enabled: boolean, ttlSeconds: number) =>
 const DATA_SOURCE_HEADER = "X-Data-Source";
 const DATA_WARNING_HEADER = "X-Data-Warning";
 const CACHE_STATUS_HEADER = "X-Cache";
+const DEFAULT_RATE_LIMIT_PER_MINUTE = 60;
+const RATE_LIMIT_PREFIX = {
+  VISIT: "visit",
+  CLICK: "click"
+};
 const parseRangeDays = (range: string) => {
   const match = /^(\d+)d$/.exec(range);
   if (!match) return 0;
@@ -989,6 +1008,70 @@ const sha1Hex = async input => {
 const incrementCounter = async (env, key, options) => {
   const current = parseInt((await env.CLICKS.get(key)) || "0", 10);
   await env.CLICKS.put(key, String(current + 1), options);
+};
+
+const normalizeBearerToken = (value: string | null) => {
+  if (!value) return "";
+  const match = /^Bearer\s+(.+)$/i.exec(value);
+  if (match) return match[1].trim();
+  return value.trim();
+};
+
+const getRateLimitPerMinute = (env: any) => {
+  const raw = env.RATE_LIMIT_PER_MINUTE;
+  if (raw === undefined || raw === null || raw === "") {
+    return DEFAULT_RATE_LIMIT_PER_MINUTE;
+  }
+  const parsed =
+    typeof raw === "number" ? raw : parseInt(String(raw), 10);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_RATE_LIMIT_PER_MINUTE;
+  }
+  return parsed;
+};
+
+const enforceRateLimit = async (
+  env: any,
+  request: Request,
+  prefix: string,
+  headers?: Record<string, string>
+) => {
+  const limit = getRateLimitPerMinute(env);
+  if (!limit || limit <= 0) return null;
+
+  const ip =
+    request.headers.get("cf-connecting-ip") ||
+    request.headers.get("x-forwarded-for");
+  if (!ip) return null;
+
+  const minute = new Date().toISOString().slice(0, 16);
+  const rateKey = `rl:${prefix}:${ip}:${minute}`;
+  const current = parseInt((await env.CLICKS.get(rateKey)) || "0", 10);
+  if (current >= limit) {
+    console.warn("abuse:rate-limit", {
+      path: prefix,
+      ip,
+      minute,
+      limit
+    });
+    return new Response("Rate limit exceeded", {
+      status: 429,
+      headers
+    });
+  }
+  await env.CLICKS.put(rateKey, String(current + 1), {
+    expirationTtl: 60
+  });
+  return null;
+};
+
+const applyAuthToCacheUrl = async (
+  cacheUrl: URL,
+  authHeader: string | null
+) => {
+  const token = normalizeBearerToken(authHeader);
+  const authHash = token ? await sha1Hex(token) : "anon";
+  cacheUrl.searchParams.set("__auth", authHash);
 };
 
 const getVisitCorsHeaders = request => {
@@ -1238,11 +1321,10 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    const rateLimitPerMinute = 0;
-    const signingSecret = undefined;
-    // To enable:
-    // const rateLimitPerMinute = Number(env.RATE_LIMIT_PER_MINUTE || 0);
-    // const signingSecret = env.CLICK_SIGNING_SECRET;
+    const signingSecret =
+      typeof env.CLICK_SIGNING_SECRET === "string"
+        ? env.CLICK_SIGNING_SECRET
+        : "";
 
     /* ----------------------------
        CLICK TRACKING (PUBLIC)
@@ -1309,6 +1391,14 @@ export default {
             headers: clickCorsHeaders
           });
         }
+
+        const rateLimitResponse = await enforceRateLimit(
+          env,
+          request,
+          RATE_LIMIT_PREFIX.CLICK,
+          clickCorsHeaders
+        );
+        if (rateLimitResponse) return rateLimitResponse;
 
         const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
         const key = `${vendor}:${type}:${date}`;
@@ -1418,22 +1508,12 @@ export default {
         return new Response("Destination not allowed", { status: 403 });
       }
 
-      if (rateLimitPerMinute > 0) {
-        const ip =
-          request.headers.get("cf-connecting-ip") ||
-          request.headers.get("x-forwarded-for");
-        if (ip) {
-          const minute = new Date().toISOString().slice(0, 16);
-          const rateKey = `rl:${ip}:${minute}`;
-          const current = parseInt((await env.CLICKS.get(rateKey)) || "0", 10);
-          if (current >= rateLimitPerMinute) {
-            return new Response("Rate limit exceeded", { status: 429 });
-          }
-          await env.CLICKS.put(rateKey, String(current + 1), {
-            expirationTtl: 60
-          });
-        }
-      }
+      const rateLimitResponse = await enforceRateLimit(
+        env,
+        request,
+        RATE_LIMIT_PREFIX.CLICK
+      );
+      if (rateLimitResponse) return rateLimitResponse;
 
       const analyticsSite = resolveAnalyticsSite(env, request);
       if (!analyticsSite) {
@@ -1482,6 +1562,14 @@ export default {
           headers: corsHeaders
         });
       }
+
+      const rateLimitResponse = await enforceRateLimit(
+        env,
+        request,
+        RATE_LIMIT_PREFIX.VISIT,
+        corsHeaders
+      );
+      if (rateLimitResponse) return rateLimitResponse;
 
       const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
       await incrementCounter(env, `raw:${date}`);
@@ -1815,6 +1903,7 @@ export default {
         const cacheUrl = new URL(request.url);
         cacheUrl.searchParams.set("site", site);
         cacheUrl.searchParams.set("range", range);
+        await applyAuthToCacheUrl(cacheUrl, auth);
         cacheKey = new Request(cacheUrl.toString(), { method: "GET" });
         const cached = await caches.default.match(cacheKey);
         if (cached) {
@@ -2081,6 +2170,20 @@ export default {
         cursor = list.cursor;
       } while (cursor);
 
+      for (const [vendor, uniques] of Object.entries(uniqueAgg)) {
+        const views = viewAgg[vendor] || 0;
+        if (uniques > views) {
+          uniqueAgg[vendor] = views;
+        }
+      }
+
+      for (const [date, uniques] of Object.entries(dailyUniqueViews)) {
+        const views = dailyViews[date] || 0;
+        if (uniques > views) {
+          dailyUniqueViews[date] = views;
+        }
+      }
+
       const vendorsSet = new Set([
         ...Object.keys(vendorAgg),
         ...Object.keys(viewAgg),
@@ -2339,6 +2442,7 @@ export default {
         cacheUrl.searchParams.set("site", analyticsSite);
         cacheUrl.searchParams.set("vendor", vendor);
         cacheUrl.searchParams.set("range", range);
+        await applyAuthToCacheUrl(cacheUrl, auth);
         cacheKey = new Request(cacheUrl.toString(), { method: "GET" });
         const cached = await caches.default.match(cacheKey);
         if (cached) {
@@ -2512,11 +2616,16 @@ export default {
         });
       }
 
+      const started = performance.now();
+      const checkedAt = new Date().toISOString();
+
       if (!analyticsEngineConfigured(env)) {
         return new Response(
           JSON.stringify({
-            status: "unconfigured",
-            generatedAt: new Date().toISOString()
+            status: "degraded",
+            latencyMs: 0,
+            lastError: "unconfigured",
+            checkedAt
           }),
           {
             status: 503,
@@ -2530,26 +2639,22 @@ export default {
       }
 
       const datasetIdent = getAnalyticsDatasetIdentifier(env);
-      const started = performance.now();
       try {
-        const rows = await analyticsEngineQuery(
+        await analyticsEngineQuery(
           env,
-          `SELECT blob1 FROM ${datasetIdent} LIMIT 1 FORMAT JSON`
+          `SELECT 1 FROM ${datasetIdent} LIMIT 1 FORMAT JSON`
         );
         const latencyMs = Math.round(performance.now() - started);
         console.log("health:ae", {
           status: "ok",
-          latencyMs,
-          rows: rows.length
+          latencyMs
         });
 
         return new Response(
           JSON.stringify({
             status: "ok",
-            dataset: datasetIdent,
-            rows: rows.length,
             latencyMs,
-            generatedAt: new Date().toISOString()
+            checkedAt
           }),
           {
             status: 200,
@@ -2562,14 +2667,14 @@ export default {
         );
       } catch (error) {
         const latencyMs = Math.round(performance.now() - started);
+        const lastError = String(error?.message || error);
         console.error("health:ae-failed", error);
         return new Response(
           JSON.stringify({
-            status: "error",
-            dataset: datasetIdent,
+            status: "degraded",
             latencyMs,
-            error: String(error?.message || error),
-            generatedAt: new Date().toISOString()
+            lastError,
+            checkedAt
           }),
           {
             status: 503,
