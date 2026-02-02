@@ -24,6 +24,16 @@ const CONTRACT = contractJson as {
 };
 const CONTRACT_VERSION = CONTRACT.apiVersion || "1.0.0";
 
+const STATS_CACHE_MAX_AGE_SECONDS = 60;
+const STATS_CACHE_SWR_SECONDS = 300;
+const STATS_CACHE_MAX_AGE_MS = STATS_CACHE_MAX_AGE_SECONDS * 1000;
+const STATS_CACHE_SWR_MS = STATS_CACHE_SWR_SECONDS * 1000;
+const STATS_CACHE_CONTROL = `public, max-age=${STATS_CACHE_MAX_AGE_SECONDS}, stale-while-revalidate=${STATS_CACHE_SWR_SECONDS}`;
+const statsInFlight = new Map<
+  string,
+  Promise<{ body: string; headers: Headers; status: number }>
+>();
+
 type VendorMetadata = {
   version: number;
   generatedAt: string;
@@ -522,7 +532,7 @@ export const buildVisitPayload = ({
 };
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     const rateLimitPerMinute = 0;
@@ -980,6 +990,11 @@ export default {
         return new Response("Invalid range", { status: 400 });
       }
 
+      const cacheKey = new Request(request.url, { method: "GET" });
+      const cacheKeyId = cacheKey.url;
+      const cache = caches.default;
+
+      const buildStatsResult = async () => {
       // Build inclusive date window
       const today = new Date();
       const dates = [];
@@ -1341,14 +1356,83 @@ export default {
           totalMs: totalMsRounded
         });
       }
-      const responseHeaders = {
+      const responseHeaders = new Headers({
         "Content-Type": "application/json",
-        "Cache-Control": "no-store"
-      };
+        "Cache-Control": STATS_CACHE_CONTROL
+      });
       if (statsTimingHeader) {
-        responseHeaders["Server-Timing"] = statsTimingHeader;
+        responseHeaders.set("Server-Timing", statsTimingHeader);
       }
-      return new Response(body, { headers: responseHeaders });
+      return { body, headers: responseHeaders, status: 200 };
+      };
+
+      const refreshStatsCache = () => {
+        let inflight = statsInFlight.get(cacheKeyId);
+        if (!inflight) {
+          inflight = (async () => {
+            const result = await buildStatsResult();
+            const cacheHeaders = new Headers(result.headers);
+            cacheHeaders.set("X-Cache-Time", Date.now().toString());
+            const cacheResponse = new Response(result.body, {
+              status: result.status,
+              headers: cacheHeaders
+            });
+            await cache.put(cacheKey, cacheResponse);
+            return result;
+          })();
+          statsInFlight.set(cacheKeyId, inflight);
+          inflight.finally(() => {
+            statsInFlight.delete(cacheKeyId);
+          });
+        }
+        return inflight;
+      };
+
+      const cachedResponse = await cache.match(cacheKey);
+      if (cachedResponse) {
+        const cacheTimeHeader = cachedResponse.headers.get("X-Cache-Time");
+        const cacheTimeMs = cacheTimeHeader ? parseInt(cacheTimeHeader, 10) : 0;
+        const ageMs = cacheTimeMs ? Date.now() - cacheTimeMs : 0;
+        const ageSeconds =
+          cacheTimeMs && ageMs >= 0 ? Math.floor(ageMs / 1000) : undefined;
+        const cachedHeaders = new Headers(cachedResponse.headers);
+        cachedHeaders.delete("X-Cache-Time");
+        if (!cachedHeaders.get("Cache-Control")) {
+          cachedHeaders.set("Cache-Control", STATS_CACHE_CONTROL);
+        }
+        if (ageSeconds !== undefined) {
+          cachedHeaders.set("Age", String(ageSeconds));
+        }
+
+        if (cacheTimeMs && ageMs <= STATS_CACHE_MAX_AGE_MS) {
+          cachedHeaders.set("X-Cache", "HIT");
+          return new Response(cachedResponse.body, {
+            status: cachedResponse.status,
+            headers: cachedHeaders
+          });
+        }
+
+        if (cacheTimeMs && ageMs <= STATS_CACHE_MAX_AGE_MS + STATS_CACHE_SWR_MS) {
+          cachedHeaders.set("X-Cache", "STALE");
+          const refreshPromise = refreshStatsCache();
+          if (ctx?.waitUntil) {
+            ctx.waitUntil(refreshPromise);
+          }
+          return new Response(cachedResponse.body, {
+            status: cachedResponse.status,
+            headers: cachedHeaders
+          });
+        }
+      }
+
+      const hadInFlight = statsInFlight.has(cacheKeyId);
+      const result = await refreshStatsCache();
+      const resultHeaders = new Headers(result.headers);
+      resultHeaders.set("X-Cache", hadInFlight ? "COALESCED" : "MISS");
+      return new Response(result.body, {
+        status: result.status,
+        headers: resultHeaders
+      });
     }
 
     /* ----------------------------
