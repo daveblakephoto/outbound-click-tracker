@@ -18,6 +18,16 @@ r2_buckets = [
   { binding = "CLICKS_SNAPSHOTS", bucket_name = "click-snapshots" }
 ]
 
+[[analytics_engine_datasets]]
+binding = "ANALYTICS_ENGINE"
+dataset = "analytics_events"
+
+[vars]
+ANALYTICS_SITE = "startmyloveengine"
+ANALYTICS_ENGINE_DATASET = "analytics_events"
+ANALYTICS_ENGINE_ACCOUNT_ID = "cc228d085f9d2bc113bc0a78dd2ea537"
+SITE_MAP_JSON = "{\"smle.mocha.app\":\"startmyloveengine\",\"go.startmyloveengine.com\":\"startmyloveengine\",\"startmyloveengine.com\":\"startmyloveengine\"}"
+
 workers_dev = false
 preview_urls = false
 [triggers]
@@ -32,3 +42,12 @@ kv_namespaces = [
 r2_buckets = [
   { binding = "CLICKS_SNAPSHOTS", bucket_name = "click-snapshots" }
 ]
+[env.production.vars]
+ANALYTICS_SITE = "startmyloveengine"
+ANALYTICS_ENGINE_DATASET = "analytics_events"
+ANALYTICS_ENGINE_ACCOUNT_ID = "cc228d085f9d2bc113bc0a78dd2ea537"
+SITE_MAP_JSON = "{\"smle.mocha.app\":\"startmyloveengine\",\"go.startmyloveengine.com\":\"startmyloveengine\",\"startmyloveengine.com\":\"startmyloveengine\"}"
+
+[[env.production.analytics_engine_datasets]]
+binding = "ANALYTICS_ENGINE"
+dataset = "analytics_events"

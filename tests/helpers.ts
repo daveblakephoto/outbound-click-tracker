@@ -85,6 +85,10 @@ export const exportVendorCSV = async (env, vendor, range = "28d") => {
   );
 
   const response = await worker.fetch(request, env);
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `export failed: ${response.status}`);
+  }
   const csv = await response.text();
 
   const lines = csv.trim().split("\n");

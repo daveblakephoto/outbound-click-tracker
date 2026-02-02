@@ -24,15 +24,668 @@ const CONTRACT = contractJson as {
 };
 const CONTRACT_VERSION = CONTRACT.apiVersion || "1.0.0";
 
-const STATS_CACHE_MAX_AGE_SECONDS = 60;
-const STATS_CACHE_SWR_SECONDS = 300;
-const STATS_CACHE_MAX_AGE_MS = STATS_CACHE_MAX_AGE_SECONDS * 1000;
-const STATS_CACHE_SWR_MS = STATS_CACHE_SWR_SECONDS * 1000;
-const STATS_CACHE_CONTROL = `public, max-age=${STATS_CACHE_MAX_AGE_SECONDS}, stale-while-revalidate=${STATS_CACHE_SWR_SECONDS}`;
-const statsInFlight = new Map<
-  string,
-  Promise<{ body: string; headers: Headers; status: number }>
->();
+const ANALYTICS_SITE_FALLBACK = "startmyloveengine";
+const ANALYTICS_EVENT_TYPES = {
+  CLICK: "click",
+  VIEW: "view",
+  UNIQUE_VIEW: "unique_view",
+  PLACEMENT_VIEW: "placement_view",
+  REFERRER: "referrer"
+} as const;
+
+type AnalyticsEventType =
+  typeof ANALYTICS_EVENT_TYPES[keyof typeof ANALYTICS_EVENT_TYPES];
+
+type AnalyticsEngineDataset = {
+  writeDataPoint: (point: {
+    indexes: string[];
+    blobs?: string[];
+    doubles?: number[];
+  }) => void;
+};
+
+type AnalyticsEventFields = {
+  eventType: AnalyticsEventType;
+  site: string;
+  vendor: string;
+  page?: string;
+  plan?: string;
+  legacyTier?: string;
+  clickType?: string;
+  placement?: string;
+  refScope?: "int" | "ext";
+  refBucket?: string;
+  date: string;
+};
+
+const ANALYTICS_BLOBS = {
+  EVENT_TYPE: 0,
+  SITE: 1,
+  VENDOR: 2,
+  PAGE: 3,
+  PLAN: 4,
+  LEGACY_TIER: 5,
+  CLICK_TYPE: 6,
+  PLACEMENT: 7,
+  REF_SCOPE: 8,
+  REF_BUCKET: 9,
+  DATE: 10
+} as const;
+
+const ANALYTICS_BLOB_COUNT = 11;
+
+const buildAnalyticsBlobs = (fields: AnalyticsEventFields) => {
+  const blobs = new Array(ANALYTICS_BLOB_COUNT).fill("");
+  blobs[ANALYTICS_BLOBS.EVENT_TYPE] = fields.eventType;
+  blobs[ANALYTICS_BLOBS.SITE] = fields.site;
+  blobs[ANALYTICS_BLOBS.VENDOR] = fields.vendor;
+  blobs[ANALYTICS_BLOBS.PAGE] = fields.page || "";
+  blobs[ANALYTICS_BLOBS.PLAN] = fields.plan || "";
+  blobs[ANALYTICS_BLOBS.LEGACY_TIER] = fields.legacyTier || "";
+  blobs[ANALYTICS_BLOBS.CLICK_TYPE] = fields.clickType || "";
+  blobs[ANALYTICS_BLOBS.PLACEMENT] = fields.placement || "";
+  blobs[ANALYTICS_BLOBS.REF_SCOPE] = fields.refScope || "";
+  blobs[ANALYTICS_BLOBS.REF_BUCKET] = fields.refBucket || "";
+  blobs[ANALYTICS_BLOBS.DATE] = fields.date;
+  return blobs;
+};
+
+const writeAnalyticsEvent = (
+  env: any,
+  fields: AnalyticsEventFields
+) => {
+  const dataset = env.ANALYTICS_ENGINE as AnalyticsEngineDataset | undefined;
+  if (!dataset) return;
+  try {
+    dataset.writeDataPoint({
+      indexes: [fields.vendor || "unknown"],
+      blobs: buildAnalyticsBlobs(fields),
+      doubles: [1]
+    });
+  } catch (error) {
+    if (env.DEBUG_STATS === "1") {
+      console.warn("analytics:write-failed", error);
+    }
+  }
+};
+
+const parseSiteSlug = (value: unknown) => {
+  if (typeof value !== "string") return "";
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return "";
+  if (!/^[a-z0-9-]+$/.test(normalized)) return "";
+  return normalized;
+};
+
+let siteConfigCache: {
+  rawMap: string;
+  rawAllowlist: string;
+  rawFallback: string;
+  config: {
+    map: Record<string, string>;
+    allowlist: Set<string>;
+    fallbackSite: string;
+  };
+} | null = null;
+
+const getSiteConfig = (env: any) => {
+  const rawMap =
+    typeof env.SITE_MAP_JSON === "string" ? env.SITE_MAP_JSON.trim() : "";
+  const rawAllowlist =
+    typeof env.SITE_ALLOWLIST === "string" ? env.SITE_ALLOWLIST.trim() : "";
+  const rawFallback =
+    typeof env.ANALYTICS_SITE === "string" ? env.ANALYTICS_SITE.trim() : "";
+
+  if (
+    siteConfigCache &&
+    siteConfigCache.rawMap === rawMap &&
+    siteConfigCache.rawAllowlist === rawAllowlist &&
+    siteConfigCache.rawFallback === rawFallback
+  ) {
+    return siteConfigCache.config;
+  }
+
+  const map: Record<string, string> = {};
+  const allowlist = new Set<string>();
+  const fallbackSite =
+    parseSiteSlug(rawFallback) || ANALYTICS_SITE_FALLBACK;
+
+  if (rawAllowlist) {
+    rawAllowlist
+      .split(",")
+      .map(item => parseSiteSlug(item))
+      .filter(Boolean)
+      .forEach(item => allowlist.add(item));
+  }
+
+  if (rawMap) {
+    try {
+      const parsed = JSON.parse(rawMap);
+      if (parsed && typeof parsed === "object") {
+        for (const [host, site] of Object.entries(parsed)) {
+          const normalizedHost = normalizeHostname(String(host || ""));
+          const normalizedSite = parseSiteSlug(site);
+          if (!normalizedHost || !normalizedSite) continue;
+          if (!isSafeHostname(normalizedHost)) continue;
+          map[normalizedHost] = normalizedSite;
+          allowlist.add(normalizedSite);
+        }
+      }
+    } catch (error) {
+      console.warn("site-map:invalid-json", error);
+    }
+  }
+
+  if (fallbackSite) {
+    allowlist.add(fallbackSite);
+  }
+
+  const config = { map, allowlist, fallbackSite };
+  siteConfigCache = { rawMap, rawAllowlist, rawFallback, config };
+  return config;
+};
+
+const isSiteAllowed = (env: any, site: string) => {
+  const { allowlist } = getSiteConfig(env);
+  return allowlist.has(site);
+};
+
+const resolveAnalyticsSite = (
+  env: any,
+  request?: Request,
+  explicitSite?: string
+) => {
+  const { map, allowlist, fallbackSite } = getSiteConfig(env);
+  if (explicitSite) {
+    const normalized = parseSiteSlug(explicitSite);
+    if (!normalized) return null;
+    return allowlist.has(normalized) ? normalized : null;
+  }
+
+  let hostSite = "";
+  if (request) {
+    try {
+      const hostname = normalizeHostname(new URL(request.url).hostname);
+      hostSite = map[hostname] || "";
+    } catch {
+      hostSite = "";
+    }
+  }
+
+  if (hostSite) {
+    return hostSite;
+  }
+
+  if (allowlist.size === 1) {
+    return Array.from(allowlist)[0] || fallbackSite;
+  }
+
+  return null;
+};
+
+const sqlString = (value: string) => `'${value.replace(/'/g, "''")}'`;
+
+const getAnalyticsDatasetName = (env: any) => {
+  if (typeof env.ANALYTICS_ENGINE_DATASET === "string") {
+    return env.ANALYTICS_ENGINE_DATASET.trim();
+  }
+  return "";
+};
+
+const analyticsEngineConfigured = (env: any) =>
+  Boolean(
+    env.ANALYTICS_ENGINE_ACCOUNT_ID &&
+      env.ANALYTICS_ENGINE_API_TOKEN &&
+      getAnalyticsDatasetName(env)
+  );
+
+const analyticsEngineQuery = async (
+  env: any,
+  sql: string
+): Promise<Record<string, unknown>[]> => {
+  const accountId = env.ANALYTICS_ENGINE_ACCOUNT_ID;
+  const apiToken = env.ANALYTICS_ENGINE_API_TOKEN;
+  const dataset = getAnalyticsDatasetName(env);
+  if (!accountId || !apiToken || !dataset) {
+    throw new Error("Analytics Engine not configured");
+  }
+  const response = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/analytics_engine/sql`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiToken}`
+      },
+      body: sql
+    }
+  );
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(
+      `Analytics Engine query failed (${response.status}): ${errorText}`
+    );
+  }
+  const json = await response.json();
+  const data = Array.isArray(json?.data) ? json.data : [];
+  return data;
+};
+
+const buildStatsResponseFromAnalyticsEngine = async ({
+  env,
+  site,
+  range,
+  dates,
+  statsTimingEnabled,
+  statsRay
+}: {
+  env: any;
+  site: string;
+  range: string;
+  dates: string[];
+  statsTimingEnabled: boolean;
+  statsRay?: string | null;
+}) => {
+  const datasetName = getAnalyticsDatasetName(env);
+  const datasetIdent = `\`${datasetName.replace(/`/g, "")}\``;
+  const startDate = dates[0];
+  const endDate = dates[dates.length - 1];
+  const baseWhere = `WHERE blob2 = ${sqlString(site)} AND blob11 >= ${sqlString(
+    startDate
+  )} AND blob11 <= ${sqlString(endDate)}`;
+
+  const timings: Record<string, number> = {};
+  const timedQuery = async (label: string, sql: string) => {
+    const start = performance.now();
+    const data = await analyticsEngineQuery(env, `${sql} FORMAT JSON`);
+    timings[label] = performance.now() - start;
+    return data;
+  };
+
+  const [clickRows, viewRows, dailyViewRows, uniqueRows, placementRows, refRows] =
+    await Promise.all([
+      timedQuery(
+        "clicks",
+        `SELECT blob3 AS vendor, blob7 AS click_type, blob11 AS date, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+          ANALYTICS_EVENT_TYPES.CLICK
+        )} AND blob3 != '' GROUP BY vendor, click_type, date`
+      ),
+      timedQuery(
+        "views",
+        `SELECT blob3 AS vendor, blob4 AS page, blob6 AS tier, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+          ANALYTICS_EVENT_TYPES.VIEW
+        )} AND blob3 != '' GROUP BY vendor, page, tier`
+      ),
+      timedQuery(
+        "daily_views",
+        `SELECT blob11 AS date, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+          ANALYTICS_EVENT_TYPES.VIEW
+        )} GROUP BY date`
+      ),
+      timedQuery(
+        "unique_views",
+        `SELECT blob3 AS vendor, blob11 AS date, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+          ANALYTICS_EVENT_TYPES.UNIQUE_VIEW
+        )} AND blob3 != '' GROUP BY vendor, date`
+      ),
+      timedQuery(
+        "placements",
+        `SELECT blob3 AS vendor, blob8 AS placement, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+          ANALYTICS_EVENT_TYPES.PLACEMENT_VIEW
+        )} AND blob3 != '' GROUP BY vendor, placement`
+      ),
+      timedQuery(
+        "referrers",
+        `SELECT blob3 AS vendor, blob9 AS scope, blob10 AS bucket, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+          ANALYTICS_EVENT_TYPES.REFERRER
+        )} AND blob3 != '' GROUP BY vendor, scope, bucket`
+      )
+    ]);
+
+  const toCount = (value: unknown) => {
+    const parsed = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(parsed)) return 0;
+    return Math.round(parsed);
+  };
+
+  const vendorAgg: Record<string, { website: number; instagram: number }> = {};
+  const viewAgg: Record<string, number> = {};
+  const uniqueAgg: Record<string, number> = {};
+  const pageAgg: Record<string, Record<string, number>> = {};
+  const refAgg: Record<
+    string,
+    { internal: Record<string, number>; external: Record<string, number> }
+  > = {};
+  const vendorTierSeen: Record<string, Set<string>> = {};
+  const placementAgg: Record<string, Record<string, number>> = {};
+  const tierViews = Object.fromEntries(
+    Array.from(TIER_ALLOWLIST).map(tier => [tier, 0])
+  );
+
+  const dailyTotals = Object.fromEntries(dates.map(d => [d, 0]));
+  const dailyViews = Object.fromEntries(dates.map(d => [d, 0]));
+  const dailyUniqueViews = Object.fromEntries(dates.map(d => [d, 0]));
+
+  for (const row of clickRows) {
+    const vendor = String(row.vendor || "").trim();
+    const clickType = String(row.click_type || "").trim().toLowerCase();
+    const date = String(row.date || "").trim();
+    if (!vendor || !ALLOWED_CLICK_TYPES.has(clickType)) continue;
+    if (!(date in dailyTotals)) continue;
+    const count = toCount(row.count);
+    if (!count) continue;
+    if (!vendorAgg[vendor]) {
+      vendorAgg[vendor] = { website: 0, instagram: 0 };
+    }
+    vendorAgg[vendor][clickType] =
+      (vendorAgg[vendor][clickType] || 0) + count;
+    dailyTotals[date] += count;
+  }
+
+  for (const row of viewRows) {
+    const vendor = String(row.vendor || "").trim();
+    if (!vendor) continue;
+    const page = String(row.page || "").trim();
+    const tier = String(row.tier || "").trim();
+    const count = toCount(row.count);
+    if (!count) continue;
+    viewAgg[vendor] = (viewAgg[vendor] || 0) + count;
+    if (page) {
+      if (!pageAgg[vendor]) pageAgg[vendor] = {};
+      pageAgg[vendor][page] = (pageAgg[vendor][page] || 0) + count;
+    }
+    if (tier) {
+      if (tierViews[tier] !== undefined) {
+        tierViews[tier] += count;
+      }
+      if (!vendorTierSeen[vendor]) vendorTierSeen[vendor] = new Set();
+      vendorTierSeen[vendor].add(tier);
+    }
+  }
+
+  for (const row of dailyViewRows) {
+    const date = String(row.date || "").trim();
+    if (!(date in dailyViews)) continue;
+    const count = toCount(row.count);
+    if (!count) continue;
+    dailyViews[date] += count;
+  }
+
+  for (const row of uniqueRows) {
+    const vendor = String(row.vendor || "").trim();
+    const date = String(row.date || "").trim();
+    if (!vendor) continue;
+    if (!(date in dailyUniqueViews)) continue;
+    const count = toCount(row.count);
+    if (!count) continue;
+    uniqueAgg[vendor] = (uniqueAgg[vendor] || 0) + count;
+    dailyUniqueViews[date] += count;
+  }
+
+  for (const row of placementRows) {
+    const vendor = String(row.vendor || "").trim();
+    const placement = String(row.placement || "").trim();
+    if (!vendor || !placement) continue;
+    const count = toCount(row.count);
+    if (!count) continue;
+    if (!placementAgg[vendor]) placementAgg[vendor] = {};
+    placementAgg[vendor][placement] =
+      (placementAgg[vendor][placement] || 0) + count;
+  }
+
+  for (const row of refRows) {
+    const vendor = String(row.vendor || "").trim();
+    const scope = String(row.scope || "").trim();
+    const bucket = String(row.bucket || "").trim();
+    if (!vendor || !bucket) continue;
+    const count = toCount(row.count);
+    if (!count) continue;
+    if (!refAgg[vendor]) {
+      refAgg[vendor] = { internal: {}, external: {} };
+    }
+    if (scope === "int") {
+      refAgg[vendor].internal[bucket] =
+        (refAgg[vendor].internal[bucket] || 0) + count;
+    } else if (scope === "ext") {
+      refAgg[vendor].external[bucket] =
+        (refAgg[vendor].external[bucket] || 0) + count;
+    }
+  }
+
+  const vendorsSet = new Set([
+    ...Object.keys(vendorAgg),
+    ...Object.keys(viewAgg),
+    ...Object.keys(uniqueAgg),
+    ...Object.keys(pageAgg),
+    ...Object.keys(refAgg),
+    ...Object.keys(placementAgg)
+  ]);
+
+  const vendors = Array.from(vendorsSet).map(vendor => {
+    const clickCounts = vendorAgg[vendor] || {
+      website: 0,
+      instagram: 0
+    };
+    const pages = pageAgg[vendor] || {};
+    const refs = refAgg[vendor] || { internal: {}, external: {} };
+    const vendorMeta = getVendorMeta(vendor);
+    const plan = getVendorPlan(vendor);
+    const placementsActive = vendorMeta ? getActivePlacements(vendor) : [];
+    const placementsCounts = Object.entries(placementAgg[vendor] || {})
+      .sort((a, b) => b[1] - a[1])
+      .map(([placement, count]) => ({ placement, count }));
+    let metaStatus = "missing";
+    if (vendorMeta) {
+      metaStatus = "ok";
+      const seen = vendorTierSeen[vendor];
+      if (seen) {
+        for (const tier of seen) {
+          if (tier !== plan) {
+            metaStatus = "mismatch";
+            console.warn("stats:vendor-plan-mismatch", {
+              vendor,
+              plan,
+              tier
+            });
+            break;
+          }
+        }
+      }
+    } else {
+      console.warn("stats:vendor-missing", { vendor });
+    }
+
+    const topInternal = Object.entries(refs.internal)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([bucket, count]) => ({ bucket, count }));
+
+    const topExternal = Object.entries(refs.external)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([domain, count]) => ({ domain, count }));
+
+    const pagesBreakdown = Object.entries(pages)
+      .sort((a, b) => b[1] - a[1])
+      .map(([page, count]) => ({ page, count }));
+
+    return {
+      vendor,
+      plan,
+      placementsActive,
+      placements: placementsCounts,
+      metaStatus,
+      website: clickCounts.website,
+      instagram: clickCounts.instagram,
+      views: viewAgg[vendor] || 0,
+      uniqueViews: uniqueAgg[vendor] || 0,
+      pages: pagesBreakdown,
+      referrers: {
+        internal: topInternal,
+        external: topExternal
+      }
+    };
+  });
+
+  const daily = dates.map(date => ({
+    date,
+    total: dailyTotals[date] || 0
+  }));
+  const dailyViewTotals = dates.map(date => ({
+    date,
+    total: dailyViews[date] || 0
+  }));
+  const dailyUniqueViewTotals = dates.map(date => ({
+    date,
+    total: dailyUniqueViews[date] || 0
+  }));
+
+  const payload = {
+    site,
+    range,
+    contractVersion: CONTRACT_VERSION,
+    generatedAt: new Date().toISOString(),
+    vendors,
+    daily,
+    dailyViews: dailyViewTotals,
+    dailyUniqueViews: dailyUniqueViewTotals,
+    tierViews
+  };
+
+  const responseHeaders = new Headers({
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store"
+  });
+
+  if (statsTimingEnabled) {
+    const totalMs = Object.values(timings).reduce(
+      (sum, value) => sum + value,
+      0
+    );
+    const timingParts = Object.entries(timings).map(
+      ([label, value]) => `${label};dur=${Math.round(value)}`
+    );
+    timingParts.push(`total;dur=${Math.round(totalMs)}`);
+    responseHeaders.set("Server-Timing", timingParts.join(", "));
+    console.log("stats:ae-timing", {
+      site,
+      range,
+      cfRay: statsRay,
+      ...Object.fromEntries(
+        Object.entries(timings).map(([label, value]) => [
+          label,
+          Math.round(value)
+        ])
+      ),
+      totalMs: Math.round(totalMs)
+    });
+  }
+
+  return new Response(JSON.stringify(payload), { headers: responseHeaders });
+};
+
+const buildVendorCsvFromAnalyticsEngine = async ({
+  env,
+  site,
+  vendor,
+  dates
+}: {
+  env: any;
+  site: string;
+  vendor: string;
+  dates: string[];
+}) => {
+  const datasetName = getAnalyticsDatasetName(env);
+  const datasetIdent = `\`${datasetName.replace(/`/g, "")}\``;
+  const startDate = dates[0];
+  const endDate = dates[dates.length - 1];
+  const baseWhere = `WHERE blob2 = ${sqlString(site)} AND blob3 = ${sqlString(
+    vendor
+  )} AND blob11 >= ${sqlString(startDate)} AND blob11 <= ${sqlString(endDate)}`;
+
+  const toCount = (value: unknown) => {
+    const parsed = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(parsed)) return 0;
+    return Math.round(parsed);
+  };
+
+  const [viewRows, uniqueRows, clickRows] = await Promise.all([
+    analyticsEngineQuery(
+      env,
+      `SELECT blob11 AS date, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+        ANALYTICS_EVENT_TYPES.VIEW
+      )} GROUP BY date FORMAT JSON`
+    ),
+    analyticsEngineQuery(
+      env,
+      `SELECT blob11 AS date, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+        ANALYTICS_EVENT_TYPES.UNIQUE_VIEW
+      )} GROUP BY date FORMAT JSON`
+    ),
+    analyticsEngineQuery(
+      env,
+      `SELECT blob11 AS date, blob7 AS click_type, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+        ANALYTICS_EVENT_TYPES.CLICK
+      )} GROUP BY date, click_type FORMAT JSON`
+    )
+  ]);
+
+  const perDate = Object.fromEntries(
+    dates.map(date => [
+      date,
+      {
+        views: 0,
+        uniqueViews: 0,
+        website: 0,
+        instagram: 0
+      }
+    ])
+  );
+
+  for (const row of viewRows) {
+    const date = String(row.date || "").trim();
+    if (!(date in perDate)) continue;
+    const count = toCount(row.count);
+    if (!count) continue;
+    perDate[date].views += count;
+  }
+
+  for (const row of uniqueRows) {
+    const date = String(row.date || "").trim();
+    if (!(date in perDate)) continue;
+    const count = toCount(row.count);
+    if (!count) continue;
+    perDate[date].uniqueViews += count;
+  }
+
+  for (const row of clickRows) {
+    const date = String(row.date || "").trim();
+    if (!(date in perDate)) continue;
+    const clickType = String(row.click_type || "").trim().toLowerCase();
+    if (!ALLOWED_CLICK_TYPES.has(clickType)) continue;
+    const count = toCount(row.count);
+    if (!count) continue;
+    perDate[date][clickType] += count;
+  }
+
+  const header =
+    "date,views,unique_views,website_clicks,instagram_clicks,ctr\n";
+  const rows = dates.map(date => {
+    const entry = perDate[date];
+    const clicks = entry.website + entry.instagram;
+    const ctr =
+      entry.views > 0 ? (clicks / entry.views).toFixed(4) : "0.0000";
+    return [
+      date,
+      entry.views,
+      entry.uniqueViews,
+      entry.website,
+      entry.instagram,
+      ctr
+    ].join(",");
+  });
+
+  return `${header}${rows.join("\n")}\n`;
+};
 
 type VendorMetadata = {
   version: number;
@@ -116,6 +769,12 @@ const RANGE_DAY_MAP = (() => {
 })();
 
 const getRangeDays = range => RANGE_DAY_MAP[range] || 0;
+const MAX_RANGE_DAYS = 90;
+const parseRangeDays = (range: string) => {
+  const match = /^(\d+)d$/.exec(range);
+  if (!match) return 0;
+  return parseInt(match[1], 10);
+};
 
 const normalizeMetadata = (input: any): VendorMetadata => {
   const fallback = {
@@ -532,7 +1191,7 @@ export const buildVisitPayload = ({
 };
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
     const rateLimitPerMinute = 0;
@@ -599,10 +1258,25 @@ export default {
           });
         }
 
+        const analyticsSite = resolveAnalyticsSite(env, request);
+        if (!analyticsSite) {
+          return new Response("Unknown site", {
+            status: 400,
+            headers: clickCorsHeaders
+          });
+        }
+
         const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
         const key = `${vendor}:${type}:${date}`;
         const current = parseInt((await env.CLICKS.get(key)) || "0", 10);
         await env.CLICKS.put(key, String(current + 1));
+        writeAnalyticsEvent(env, {
+          eventType: ANALYTICS_EVENT_TYPES.CLICK,
+          site: analyticsSite,
+          vendor,
+          clickType: type,
+          date
+        });
 
         return new Response(null, { status: 204, headers: clickCorsHeaders });
       }
@@ -717,12 +1391,24 @@ export default {
         }
       }
 
+      const analyticsSite = resolveAnalyticsSite(env, request);
+      if (!analyticsSite) {
+        return new Response("Unknown site", { status: 400 });
+      }
+
       // Daily KV key
       const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
       const key = `${vendor}:${type}:${date}`;
 
       const current = parseInt((await env.CLICKS.get(key)) || "0", 10);
       await env.CLICKS.put(key, String(current + 1));
+      writeAnalyticsEvent(env, {
+        eventType: ANALYTICS_EVENT_TYPES.CLICK,
+        site: analyticsSite,
+        vendor,
+        clickType: type,
+        date
+      });
 
       // Redirect
       return Response.redirect(destUrl.toString(), 302);
@@ -742,6 +1428,14 @@ export default {
         return new Response("Method not allowed", {
           status: 405,
           headers: { Allow: "POST", ...corsHeaders }
+        });
+      }
+
+      const analyticsSite = resolveAnalyticsSite(env, request);
+      if (!analyticsSite) {
+        return new Response("Unknown site", {
+          status: 400,
+          headers: corsHeaders
         });
       }
 
@@ -813,6 +1507,15 @@ export default {
       if (env.DEBUG_VISITS === "1") {
         console.log("visit", { ...payload, plan, metaStatus });
       }
+      writeAnalyticsEvent(env, {
+        eventType: ANALYTICS_EVENT_TYPES.VIEW,
+        site: analyticsSite,
+        vendor,
+        page,
+        plan,
+        legacyTier,
+        date
+      });
 
       const ip =
         request.headers.get("cf-connecting-ip") ||
@@ -826,6 +1529,15 @@ export default {
       if (!seen) {
         await env.CLICKS.put(lockKey, "1", { expirationTtl: 1800 });
         await incrementCounter(env, `uview:${vendor}:${date}`);
+        writeAnalyticsEvent(env, {
+          eventType: ANALYTICS_EVENT_TYPES.UNIQUE_VIEW,
+          site: analyticsSite,
+          vendor,
+          page,
+          plan,
+          legacyTier,
+          date
+        });
       }
 
       await incrementCounter(env, `view:${vendor}:${date}`);
@@ -843,6 +1555,16 @@ export default {
       for (const placement of placementUnion) {
         await incrementCounter(env, `plcview:${placement}:${date}`);
         await incrementCounter(env, `plcview:${vendor}:${placement}:${date}`);
+        writeAnalyticsEvent(env, {
+          eventType: ANALYTICS_EVENT_TYPES.PLACEMENT_VIEW,
+          site: analyticsSite,
+          vendor,
+          placement,
+          page,
+          plan,
+          legacyTier,
+          date
+        });
       }
 
       const referrerValue =
@@ -871,11 +1593,33 @@ export default {
                 env,
                 `ref:${vendor}:int:${bucket}:${date}`
               );
+              writeAnalyticsEvent(env, {
+                eventType: ANALYTICS_EVENT_TYPES.REFERRER,
+                site: analyticsSite,
+                vendor,
+                page,
+                plan,
+                legacyTier,
+                refScope: "int",
+                refBucket: bucket,
+                date
+              });
             } else {
               await incrementCounter(
                 env,
                 `ref:${vendor}:ext:${hostname}:${date}`
               );
+              writeAnalyticsEvent(env, {
+                eventType: ANALYTICS_EVENT_TYPES.REFERRER,
+                site: analyticsSite,
+                vendor,
+                page,
+                plan,
+                legacyTier,
+                refScope: "ext",
+                refBucket: hostname,
+                date
+              });
             }
           }
         }
@@ -978,23 +1722,33 @@ export default {
         return new Response("Unauthorized", { status: 401 });
       }
 
-      const site = url.searchParams.get("site");
+      const siteParam = url.searchParams.get("site");
       const range = url.searchParams.get("range") || "28d";
 
-      if (!site) {
+      if (!siteParam) {
         return new Response("Missing site", { status: 400 });
+      }
+      const site = parseSiteSlug(siteParam);
+      if (!site) {
+        return new Response("Invalid site", { status: 400 });
       }
 
       const rangeDays = getRangeDays(range);
+      const rawRangeDays = parseRangeDays(range);
+      if (rawRangeDays > MAX_RANGE_DAYS) {
+        console.log("stats:range-reject", {
+          site,
+          range,
+          maxDays: MAX_RANGE_DAYS
+        });
+        return new Response(`Max range is ${MAX_RANGE_DAYS} days`, {
+          status: 400
+        });
+      }
       if (!rangeDays) {
         return new Response("Invalid range", { status: 400 });
       }
 
-      const cacheKey = new Request(request.url, { method: "GET" });
-      const cacheKeyId = cacheKey.url;
-      const cache = caches.default;
-
-      const buildStatsResult = async () => {
       // Build inclusive date window
       const today = new Date();
       const dates = [];
@@ -1003,6 +1757,27 @@ export default {
         d.setDate(d.getDate() - i);
         dates.push(d.toISOString().slice(0, 10));
       }
+      if (!isSiteAllowed(env, site)) {
+        return new Response("Unknown site", { status: 404 });
+      }
+
+      if (analyticsEngineConfigured(env)) {
+        try {
+          console.log("stats:ae", { cached: false, range, site });
+          return await buildStatsResponseFromAnalyticsEngine({
+            env,
+            site,
+            range,
+            dates,
+            statsTimingEnabled,
+            statsRay
+          });
+        } catch (error) {
+          console.error("stats:analytics-engine-failed", error);
+          return new Response("service_unavailable", { status: 502 });
+        }
+      }
+      console.log("stats:kv", { cached: false, range, site });
 
       const vendorAgg = {};
       const viewAgg = {};
@@ -1358,80 +2133,14 @@ export default {
       }
       const responseHeaders = new Headers({
         "Content-Type": "application/json",
-        "Cache-Control": STATS_CACHE_CONTROL
+        "Cache-Control": "no-store"
       });
       if (statsTimingHeader) {
         responseHeaders.set("Server-Timing", statsTimingHeader);
       }
-      return { body, headers: responseHeaders, status: 200 };
-      };
-
-      const refreshStatsCache = () => {
-        let inflight = statsInFlight.get(cacheKeyId);
-        if (!inflight) {
-          inflight = (async () => {
-            const result = await buildStatsResult();
-            const cacheHeaders = new Headers(result.headers);
-            cacheHeaders.set("X-Cache-Time", Date.now().toString());
-            const cacheResponse = new Response(result.body, {
-              status: result.status,
-              headers: cacheHeaders
-            });
-            await cache.put(cacheKey, cacheResponse);
-            return result;
-          })();
-          statsInFlight.set(cacheKeyId, inflight);
-          inflight.finally(() => {
-            statsInFlight.delete(cacheKeyId);
-          });
-        }
-        return inflight;
-      };
-
-      const cachedResponse = await cache.match(cacheKey);
-      if (cachedResponse) {
-        const cacheTimeHeader = cachedResponse.headers.get("X-Cache-Time");
-        const cacheTimeMs = cacheTimeHeader ? parseInt(cacheTimeHeader, 10) : 0;
-        const ageMs = cacheTimeMs ? Date.now() - cacheTimeMs : 0;
-        const ageSeconds =
-          cacheTimeMs && ageMs >= 0 ? Math.floor(ageMs / 1000) : undefined;
-        const cachedHeaders = new Headers(cachedResponse.headers);
-        cachedHeaders.delete("X-Cache-Time");
-        if (!cachedHeaders.get("Cache-Control")) {
-          cachedHeaders.set("Cache-Control", STATS_CACHE_CONTROL);
-        }
-        if (ageSeconds !== undefined) {
-          cachedHeaders.set("Age", String(ageSeconds));
-        }
-
-        if (cacheTimeMs && ageMs <= STATS_CACHE_MAX_AGE_MS) {
-          cachedHeaders.set("X-Cache", "HIT");
-          return new Response(cachedResponse.body, {
-            status: cachedResponse.status,
-            headers: cachedHeaders
-          });
-        }
-
-        if (cacheTimeMs && ageMs <= STATS_CACHE_MAX_AGE_MS + STATS_CACHE_SWR_MS) {
-          cachedHeaders.set("X-Cache", "STALE");
-          const refreshPromise = refreshStatsCache();
-          if (ctx?.waitUntil) {
-            ctx.waitUntil(refreshPromise);
-          }
-          return new Response(cachedResponse.body, {
-            status: cachedResponse.status,
-            headers: cachedHeaders
-          });
-        }
-      }
-
-      const hadInFlight = statsInFlight.has(cacheKeyId);
-      const result = await refreshStatsCache();
-      const resultHeaders = new Headers(result.headers);
-      resultHeaders.set("X-Cache", hadInFlight ? "COALESCED" : "MISS");
-      return new Response(result.body, {
-        status: result.status,
-        headers: resultHeaders
+      return new Response(body, {
+        status: 200,
+        headers: responseHeaders
       });
     }
 
@@ -1459,6 +2168,7 @@ export default {
 
       const vendor = url.searchParams.get("vendor") || "";
       const range = url.searchParams.get("range") || "28d";
+      const siteParam = url.searchParams.get("site");
 
       if (!vendor) {
         return new Response("Missing vendor", { status: 400, headers: corsHeaders });
@@ -1469,6 +2179,19 @@ export default {
       }
 
       const rangeDays = getRangeDays(range);
+      const rawRangeDays = parseRangeDays(range);
+      if (rawRangeDays > MAX_RANGE_DAYS) {
+        console.log("export:range-reject", {
+          site: siteParam || "unknown",
+          vendor,
+          range,
+          maxDays: MAX_RANGE_DAYS
+        });
+        return new Response(`Max range is ${MAX_RANGE_DAYS} days`, {
+          status: 400,
+          headers: corsHeaders
+        });
+      }
       if (!rangeDays) {
         return new Response("Invalid range", { status: 400, headers: corsHeaders });
       }
@@ -1480,6 +2203,69 @@ export default {
         d.setDate(d.getDate() - i);
         dates.push(d.toISOString().slice(0, 10));
       }
+
+      let analyticsSite: string | null = null;
+      if (siteParam) {
+        const parsedSite = parseSiteSlug(siteParam);
+        if (!parsedSite) {
+          return new Response("Invalid site", {
+            status: 400,
+            headers: corsHeaders
+          });
+        }
+        if (!isSiteAllowed(env, parsedSite)) {
+          return new Response("Unknown site", {
+            status: 404,
+            headers: corsHeaders
+          });
+        }
+        analyticsSite = parsedSite;
+      } else {
+        analyticsSite = resolveAnalyticsSite(env, request);
+        if (!analyticsSite) {
+          return new Response("Unknown site", {
+            status: 404,
+            headers: corsHeaders
+          });
+        }
+      }
+
+      if (analyticsEngineConfigured(env)) {
+        try {
+          console.log("export:ae", {
+            cached: false,
+            range,
+            site: analyticsSite,
+            vendor
+          });
+          const csv = await buildVendorCsvFromAnalyticsEngine({
+            env,
+            site: analyticsSite,
+            vendor,
+            dates
+          });
+
+          return new Response(csv, {
+            headers: {
+              "Content-Type": "text/csv; charset=utf-8",
+              "Cache-Control": "no-store",
+              ...corsHeaders
+            }
+          });
+        } catch (error) {
+          console.error("vendor-export:analytics-engine-failed", error);
+          return new Response("service_unavailable", {
+            status: 502,
+            headers: corsHeaders
+          });
+        }
+      }
+      console.log("export:kv", {
+        cached: false,
+        range,
+        site: analyticsSite,
+        vendor
+      });
 
       const perDate = Object.fromEntries(
         dates.map(date => [

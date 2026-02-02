@@ -158,3 +158,14 @@ test("7d export has no gaps or future dates", async () => {
     previous = row.date;
   }
 });
+
+test("rejects range larger than 90d", async () => {
+  const env = {
+    CLICKS,
+    ANALYTICS_API_TOKEN: "test-secret"
+  } as any;
+
+  await expect(exportVendorCSV(env, "dave-blake", "180d")).rejects.toThrow(
+    /Max range is 90 days/
+  );
+});

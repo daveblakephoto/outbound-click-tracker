@@ -27,11 +27,11 @@ afterAll(async () => {
 test("increments tier view counters on visit", async () => {
   const today = new Date().toISOString().slice(0, 10);
   const payload = {
-    vendor: "test-vendor",
+    vendor: "dave-blake",
     page: "profile",
     tier: "featured",
     referrer: "https://startmyloveengine.com/spotlight",
-    url: "https://startmyloveengine.com/vendors/test-vendor"
+    url: "https://startmyloveengine.com/vendors/dave-blake"
   };
 
   const request = new Request("https://example.com/visit", {
@@ -49,9 +49,9 @@ test("increments tier view counters on visit", async () => {
 
   expect(response.status).toBe(204);
   expect(await CLICKS.get(`tview:featured:${today}`)).toBe("1");
-  expect(await CLICKS.get(`tview:test-vendor:featured:${today}`)).toBe("1");
+  expect(await CLICKS.get(`tview:dave-blake:featured:${today}`)).toBe("1");
   expect(await CLICKS.get(`planview:featured:${today}`)).toBe("1");
-  expect(await CLICKS.get(`planview:test-vendor:featured:${today}`)).toBe("1");
+  expect(await CLICKS.get(`planview:dave-blake:featured:${today}`)).toBe("1");
 });
 
 test("accepts unknown vendor and assigns unknown plan", async () => {

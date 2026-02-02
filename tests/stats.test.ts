@@ -26,7 +26,7 @@ afterAll(async () => {
 
 test("returns current stats", async () => {
   const today = new Date().toISOString().slice(0, 10);
-  await CLICKS.put(`test-vendor:website:${today}`, "3");
+  await CLICKS.put(`dave-blake:website:${today}`, "3");
 
   const request = new Request(
     "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
@@ -45,7 +45,7 @@ test("returns current stats", async () => {
 
   const json = await response.json();
   expect(json.vendors.length).toBeGreaterThan(0);
-  const vendor = json.vendors.find((row: any) => row.vendor === "test-vendor");
+  const vendor = json.vendors.find((row: any) => row.vendor === "dave-blake");
   expect(vendor.plan).toBe("featured");
   expect(Array.isArray(vendor.placementsActive)).toBe(true);
 });
@@ -96,6 +96,24 @@ test("rejects invalid range", async () => {
   expect(response.status).toBe(400);
 });
 
+test("rejects range larger than 90d", async () => {
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=180d",
+    {
+      headers: { Authorization: "Bearer test-secret" }
+    }
+  );
+
+  const env = {
+    CLICKS,
+    ANALYTICS_API_TOKEN: "test-secret"
+  } as any;
+
+  const response = await worker.fetch(request, env);
+  expect(response.status).toBe(400);
+  expect(await response.text()).toMatch(/Max range is 90 days/);
+});
+
 test("returns tier views", async () => {
   const today = new Date().toISOString().slice(0, 10);
   await CLICKS.put(`tview:spotlight:${today}`, "4");
@@ -125,8 +143,8 @@ test("returns tier views", async () => {
 
 test("returns placement counts per vendor", async () => {
   const today = new Date().toISOString().slice(0, 10);
-  await CLICKS.put(`plcview:vendor-basic:spotlight:${today}`, "3");
-  await CLICKS.put(`plcview:vendor-basic:editor_pick:${today}`, "1");
+  await CLICKS.put(`plcview:dave-blake:spotlight:${today}`, "3");
+  await CLICKS.put(`plcview:dave-blake:home:${today}`, "1");
 
   const request = new Request(
     "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
@@ -143,10 +161,10 @@ test("returns placement counts per vendor", async () => {
   const response = await worker.fetch(request, env);
   const json = await response.json();
 
-  const vendor = json.vendors.find((row: any) => row.vendor === "vendor-basic");
+  const vendor = json.vendors.find((row: any) => row.vendor === "dave-blake");
   expect(vendor.placements).toEqual([
     { placement: "spotlight", count: 3 },
-    { placement: "editor_pick", count: 1 }
+    { placement: "home", count: 1 }
   ]);
 });
 
@@ -181,7 +199,7 @@ test("returns metaStatus for vendors", async () => {
         "user-agent": "test-agent"
       },
       body: JSON.stringify({
-        vendor: "vendor-basic",
+        vendor: "nahid-kholghi",
         page: "profile",
         tier: "basic"
       })
@@ -198,7 +216,7 @@ test("returns metaStatus for vendors", async () => {
         "user-agent": "test-agent"
       },
       body: JSON.stringify({
-        vendor: "test-vendor",
+        vendor: "dave-blake",
         page: "profile",
         tier: "basic"
       })
@@ -217,8 +235,8 @@ test("returns metaStatus for vendors", async () => {
   const json = await response.json();
 
   const unknown = json.vendors.find((row: any) => row.vendor === "unknown-vendor");
-  const ok = json.vendors.find((row: any) => row.vendor === "vendor-basic");
-  const mismatch = json.vendors.find((row: any) => row.vendor === "test-vendor");
+  const ok = json.vendors.find((row: any) => row.vendor === "nahid-kholghi");
+  const mismatch = json.vendors.find((row: any) => row.vendor === "dave-blake");
 
   expect(unknown.plan).toBe("unknown");
   expect(unknown.metaStatus).toBe("missing");
