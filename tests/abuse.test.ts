@@ -111,3 +111,55 @@ test("signed click accepted and invalid signature rejected", async () => {
   const badResponse = await worker.fetch(badRequest, env);
   expect(badResponse.status).toBe(401);
 });
+
+test("POST click is accepted with server-side signing enabled", async () => {
+  const secret = "super-secret";
+  const env = {
+    CLICKS,
+    CLICK_SIGNING_SECRET: secret,
+    ANALYTICS_SITE: "startmyloveengine"
+  } as any;
+
+  const vendor = "dave-blake";
+  const type = "website";
+  const url = "https://startmyloveengine.com";
+
+  const okRequest = new Request("https://example.com/click", {
+    method: "POST",
+    headers: {
+      Origin: "https://startmyloveengine.com",
+      Referer: "https://startmyloveengine.com/profile",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.55",
+      "user-agent": "test-agent"
+    },
+    body: JSON.stringify({ vendor, type, url })
+  });
+
+  const okResponse = await worker.fetch(okRequest, env);
+  expect(okResponse.status).toBe(204);
+});
+
+test("POST click rejects missing referrer", async () => {
+  const env = {
+    CLICKS,
+    CLICK_SIGNING_SECRET: "super-secret",
+    ANALYTICS_SITE: "startmyloveengine"
+  } as any;
+
+  const request = new Request("https://example.com/click", {
+    method: "POST",
+    headers: {
+      Origin: "https://startmyloveengine.com",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      vendor: "dave-blake",
+      type: "website",
+      url: "https://startmyloveengine.com"
+    })
+  });
+
+  const response = await worker.fetch(request, env);
+  expect(response.status).toBe(403);
+});

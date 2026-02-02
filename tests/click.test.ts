@@ -40,14 +40,19 @@ test("accepts POST click payloads", async () => {
   const today = new Date().toISOString().slice(0, 10);
   const request = new Request("https://example.com/click", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      Origin: "https://startmyloveengine.com",
+      Referer: "https://startmyloveengine.com/spotlight",
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify({
       vendor: "test-vendor",
-      type: "website"
+      type: "website",
+      url: "https://startmyloveengine.com/vendors/test-vendor"
     })
   });
 
-  const env = { CLICKS } as any;
+  const env = { CLICKS, CLICK_SIGNING_SECRET: "secret" } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(204);
@@ -60,20 +65,43 @@ test("includes CORS headers on POST click", async () => {
     method: "POST",
     headers: {
       Origin: origin,
+      Referer: "https://startmyloveengine.com/profile",
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
       vendor: "test-vendor",
-      type: "website"
+      type: "website",
+      url: "https://startmyloveengine.com/vendors/test-vendor"
     })
   });
 
-  const env = { CLICKS } as any;
+  const env = { CLICKS, CLICK_SIGNING_SECRET: "secret" } as any;
   const response = await worker.fetch(request, env);
 
   expect(response.status).toBe(204);
   expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
   expect(response.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+});
+
+test("rejects POST click with invalid origin", async () => {
+  const request = new Request("https://example.com/click", {
+    method: "POST",
+    headers: {
+      Origin: "https://evil.example",
+      Referer: "https://evil.example/page",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      vendor: "test-vendor",
+      type: "website",
+      url: "https://startmyloveengine.com/vendors/test-vendor"
+    })
+  });
+
+  const env = { CLICKS, CLICK_SIGNING_SECRET: "secret" } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(403);
 });
 
 test("rejects non-GET/POST requests", async () => {

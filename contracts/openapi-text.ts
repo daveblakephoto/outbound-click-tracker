@@ -95,6 +95,9 @@ paths:
                 type:
                   type: string
                   enum: [website, instagram]
+                url:
+                  type: string
+                  description: current page URL (used for server-side signing)
               required: [vendor, type]
       responses:
         "204":

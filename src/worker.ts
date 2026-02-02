@@ -55,6 +55,7 @@ type AnalyticsEventFields = {
   placement?: string;
   refScope?: "int" | "ext";
   refBucket?: string;
+  signature?: string;
   date: string;
 };
 
@@ -69,10 +70,11 @@ const ANALYTICS_BLOBS = {
   PLACEMENT: 7,
   REF_SCOPE: 8,
   REF_BUCKET: 9,
-  DATE: 10
+  DATE: 10,
+  SIGNATURE: 11
 } as const;
 
-const ANALYTICS_BLOB_COUNT = 11;
+const ANALYTICS_BLOB_COUNT = 12;
 
 const buildAnalyticsBlobs = (fields: AnalyticsEventFields) => {
   const blobs = new Array(ANALYTICS_BLOB_COUNT).fill("");
@@ -87,6 +89,7 @@ const buildAnalyticsBlobs = (fields: AnalyticsEventFields) => {
   blobs[ANALYTICS_BLOBS.REF_SCOPE] = fields.refScope || "";
   blobs[ANALYTICS_BLOBS.REF_BUCKET] = fields.refBucket || "";
   blobs[ANALYTICS_BLOBS.DATE] = fields.date;
+  blobs[ANALYTICS_BLOBS.SIGNATURE] = fields.signature || "";
   return blobs;
 };
 
@@ -1005,6 +1008,25 @@ const sha1Hex = async input => {
     .join("");
 };
 
+const hmacSha256Hex = async (secret: string, payload: string) => {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"]
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(payload)
+  );
+  return Array.from(new Uint8Array(signature))
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+};
+
 const incrementCounter = async (env, key, options) => {
   const current = parseInt((await env.CLICKS.get(key)) || "0", 10);
   await env.CLICKS.put(key, String(current + 1), options);
@@ -1087,6 +1109,19 @@ const getVisitCorsHeaders = request => {
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400"
   };
+};
+
+const isAllowedClickOrigin = (origin: string | null) =>
+  Boolean(origin && VISIT_ALLOWED_ORIGINS.has(origin));
+
+const isAllowedClickReferrer = (referrer: string | null) => {
+  if (!referrer) return false;
+  try {
+    const refUrl = new URL(referrer);
+    return isAllowedClickOrigin(refUrl.origin);
+  } catch {
+    return false;
+  }
 };
 
 const isAllowedExportOrigin = origin => {
@@ -1355,6 +1390,8 @@ export default {
             : typeof payload?.target === "string"
               ? payload.target.trim()
               : "";
+        const urlValue =
+          typeof payload?.url === "string" ? payload.url.trim() : "";
 
         if (!vendor || !type) {
           return new Response("Missing parameters", {
@@ -1384,6 +1421,39 @@ export default {
           });
         }
 
+        if (urlValue.length > 2048) {
+          return new Response("Invalid parameters", {
+            status: 400,
+            headers: clickCorsHeaders
+          });
+        }
+
+        const origin = request.headers.get("Origin");
+        if (!isAllowedClickOrigin(origin)) {
+          console.warn("abuse:click-origin", {
+            vendor,
+            origin: origin || "missing"
+          });
+          return new Response("Invalid origin", {
+            status: 403,
+            headers: clickCorsHeaders
+          });
+        }
+
+        const referrerHeader =
+          request.headers.get("Referer") ||
+          request.headers.get("Referrer");
+        if (!isAllowedClickReferrer(referrerHeader)) {
+          console.warn("abuse:click-referrer", {
+            vendor,
+            referrer: referrerHeader || "missing"
+          });
+          return new Response("Invalid referrer", {
+            status: 403,
+            headers: clickCorsHeaders
+          });
+        }
+
         const analyticsSite = resolveAnalyticsSite(env, request);
         if (!analyticsSite) {
           return new Response("Unknown site", {
@@ -1400,6 +1470,30 @@ export default {
         );
         if (rateLimitResponse) return rateLimitResponse;
 
+        if (!signingSecret) {
+          console.warn("click:signing-missing", {
+            vendor,
+            origin: origin || "missing"
+          });
+          return new Response("Click signing not configured", {
+            status: 503,
+            headers: clickCorsHeaders
+          });
+        }
+
+        const urlToSign = urlValue || referrerHeader || "";
+        if (!urlToSign || urlToSign.length > 2048) {
+          return new Response("Invalid url", {
+            status: 400,
+            headers: clickCorsHeaders
+          });
+        }
+
+        const clickSignature = await hmacSha256Hex(
+          signingSecret,
+          `${vendor}|${type}|${urlToSign}`
+        );
+
         const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
         const key = `${vendor}:${type}:${date}`;
         const current = parseInt((await env.CLICKS.get(key)) || "0", 10);
@@ -1409,6 +1503,7 @@ export default {
           site: analyticsSite,
           vendor,
           clickType: type,
+          signature: clickSignature,
           date
         });
 
@@ -1457,31 +1552,22 @@ export default {
         return new Response("Invalid destination URL", { status: 400 });
       }
 
+      const signature = url.searchParams.get("sig");
+      if (!signature) {
+        const ip =
+          request.headers.get("cf-connecting-ip") ||
+          request.headers.get("x-forwarded-for") ||
+          "";
+        console.log("legacy_click", { vendor, ip });
+      }
+
       if (signingSecret) {
-        const signature = url.searchParams.get("sig");
         if (!signature) {
           return new Response("Missing signature", { status: 401 });
         }
 
-        const encoder = new TextEncoder();
-        const key = await crypto.subtle.importKey(
-          "raw",
-          encoder.encode(signingSecret),
-          { name: "HMAC", hash: "SHA-256" },
-          false,
-          ["sign", "verify"]
-        );
-
         const payload = `${vendor}|${type}|${destination}`;
-        const expected = await crypto.subtle.sign(
-          "HMAC",
-          key,
-          encoder.encode(payload)
-        );
-
-        const expectedHex = Array.from(new Uint8Array(expected))
-          .map(b => b.toString(16).padStart(2, "0"))
-          .join("");
+        const expectedHex = await hmacSha256Hex(signingSecret, payload);
 
         if (signature !== expectedHex) {
           return new Response("Invalid signature", { status: 401 });
@@ -1531,6 +1617,9 @@ export default {
         site: analyticsSite,
         vendor,
         clickType: type,
+        signature: signingSecret
+          ? await hmacSha256Hex(signingSecret, `${vendor}|${type}|${destination}`)
+          : "",
         date
       });
 
