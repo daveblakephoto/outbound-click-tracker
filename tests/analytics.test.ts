@@ -57,7 +57,8 @@ test("visit counting increments views and de-duplicates unique views", async () 
 test("clicks correlate with visits in stats", async () => {
   const env = {
     CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret"
+    ANALYTICS_API_TOKEN: "test-secret",
+    CLICK_SIGNING_SECRET: "secret"
   } as any;
 
   await postVisit(env, "vendor-b");

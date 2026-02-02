@@ -5,25 +5,6 @@ import worker from "../src/worker";
 let mf: Miniflare;
 let CLICKS: any;
 
-const hmacHex = async (secret: string, payload: string) => {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    encoder.encode(payload)
-  );
-  return Array.from(new Uint8Array(signature))
-    .map(b => b.toString(16).padStart(2, "0"))
-    .join("");
-};
-
 beforeAll(async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-02-02T10:00:00.000Z"));
@@ -77,39 +58,6 @@ test("rate limits /visit after threshold", async () => {
 
   const second = await worker.fetch(makeRequest(), env);
   expect(second.status).toBe(429);
-});
-
-test("signed click accepted and invalid signature rejected", async () => {
-  const secret = "super-secret";
-  const env = {
-    CLICKS,
-    CLICK_SIGNING_SECRET: secret,
-    ANALYTICS_SITE: "startmyloveengine"
-  } as any;
-
-  const vendor = "dave-blake";
-  const type = "website";
-  const to = "https://startmyloveengine.com";
-  const payload = `${vendor}|${type}|${to}`;
-  const sig = await hmacHex(secret, payload);
-
-  const okRequest = new Request(
-    `https://example.com/click?vendor=${vendor}&type=${type}&to=${encodeURIComponent(
-      to
-    )}&sig=${sig}`
-  );
-
-  const okResponse = await worker.fetch(okRequest, env);
-  expect(okResponse.status).toBe(302);
-
-  const badRequest = new Request(
-    `https://example.com/click?vendor=${vendor}&type=${type}&to=${encodeURIComponent(
-      to
-    )}&sig=bad`
-  );
-
-  const badResponse = await worker.fetch(badRequest, env);
-  expect(badResponse.status).toBe(401);
 });
 
 test("POST click is accepted with server-side signing enabled", async () => {

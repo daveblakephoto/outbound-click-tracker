@@ -24,6 +24,11 @@
       "https://www.startmyloveengine.com"
     ]
   },
+  "endpoints": {
+    "click": {
+      "methods": ["POST"]
+    }
+  },
   "responses": {
     "stats": {
       "dataSource": ["ae", "kv", "cache"],

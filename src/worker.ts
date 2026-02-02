@@ -1510,121 +1510,30 @@ export default {
         return new Response(null, { status: 204, headers: clickCorsHeaders });
       }
 
-      if (request.method !== "GET") {
-        return new Response("Method not allowed", {
-          status: 405,
-          headers: { Allow: "GET, POST, OPTIONS" }
-        });
-      }
-
-      const vendor = url.searchParams.get("vendor");
-      const type = url.searchParams.get("type"); // website | instagram
-      const destination = url.searchParams.get("to");
-
-      // Required params
-      if (!vendor || !type || !destination) {
-        return new Response("Missing parameters", { status: 400 });
-      }
-
-      if (vendor.length > 64 || destination.length > 2048) {
-        return new Response("Invalid parameters", { status: 400 });
-      }
-
-      // Vendor slug validation (safe KV keys)
-      if (!VENDOR_SLUG_REGEX.test(vendor)) {
-        return new Response("Invalid vendor", { status: 400 });
-      }
-
-      // Click type allow-list
-      if (!ALLOWED_CLICK_TYPES.has(type)) {
-        return new Response("Invalid type", { status: 400 });
-      }
-
-      // Destination URL validation
-      let destUrl;
-      try {
-        destUrl = new URL(destination);
-      } catch {
-        return new Response("Invalid destination URL", { status: 400 });
-      }
-
-      if (destUrl.protocol !== "https:" || destUrl.username || destUrl.password) {
-        return new Response("Invalid destination URL", { status: 400 });
-      }
-
-      const signature = url.searchParams.get("sig");
-      if (!signature) {
+      if (request.method === "GET") {
+        const vendor = url.searchParams.get("vendor") || "unknown";
         const ip =
           request.headers.get("cf-connecting-ip") ||
           request.headers.get("x-forwarded-for") ||
           "";
-        console.log("legacy_click", { vendor, ip });
+        console.log("legacy_click_blocked", { vendor, ip });
+        return new Response(
+          JSON.stringify({
+            error: "Legacy click tracking disabled. Use POST /click."
+          }),
+          {
+            status: 410,
+            headers: {
+              "Content-Type": "application/json"
+            }
+          }
+        );
       }
 
-      if (signingSecret) {
-        if (!signature) {
-          return new Response("Missing signature", { status: 401 });
-        }
-
-        const payload = `${vendor}|${type}|${destination}`;
-        const expectedHex = await hmacSha256Hex(signingSecret, payload);
-
-        if (signature !== expectedHex) {
-          return new Response("Invalid signature", { status: 401 });
-        }
-      }
-
-      // Normalise hostname (strip www)
-      const hostname = destUrl.hostname.replace(/^www\./, "");
-
-      // Destination allow-list
-      const ALLOWED_DOMAINS = [
-        "dave-blake.com",
-        "startmyloveengine.com",
-        "makeupartistbyronbay.com.au",
-        "kacper-goodtimes.com"
-      ];
-
-      const isAllowed =
-        ALLOWED_DOMAINS.includes(hostname) ||
-        hostname === "instagram.com" ||
-        hostname.endsWith(".instagram.com");
-
-      if (!isAllowed) {
-        return new Response("Destination not allowed", { status: 403 });
-      }
-
-      const rateLimitResponse = await enforceRateLimit(
-        env,
-        request,
-        RATE_LIMIT_PREFIX.CLICK
-      );
-      if (rateLimitResponse) return rateLimitResponse;
-
-      const analyticsSite = resolveAnalyticsSite(env, request);
-      if (!analyticsSite) {
-        return new Response("Unknown site", { status: 400 });
-      }
-
-      // Daily KV key
-      const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-      const key = `${vendor}:${type}:${date}`;
-
-      const current = parseInt((await env.CLICKS.get(key)) || "0", 10);
-      await env.CLICKS.put(key, String(current + 1));
-      writeAnalyticsEvent(env, {
-        eventType: ANALYTICS_EVENT_TYPES.CLICK,
-        site: analyticsSite,
-        vendor,
-        clickType: type,
-        signature: signingSecret
-          ? await hmacSha256Hex(signingSecret, `${vendor}|${type}|${destination}`)
-          : "",
-        date
+      return new Response("Method not allowed", {
+        status: 405,
+        headers: { Allow: "POST, OPTIONS" }
       });
-
-      // Redirect
-      return Response.redirect(destUrl.toString(), 302);
     }
 
     /* ----------------------------

@@ -41,14 +41,17 @@ export const postVisit = async (
 export const triggerClick = async (
   env,
   vendor,
-  { type = "website", to = "https://startmyloveengine.com" } = {}
+  { type = "website", url = "https://startmyloveengine.com" } = {}
 ) => {
-  const request = new Request(
-    `https://example.com/click?vendor=${vendor}&type=${type}&to=${encodeURIComponent(
-      to
-    )}`,
-    { method: "GET" }
-  );
+  const request = new Request("https://example.com/click", {
+    method: "POST",
+    headers: {
+      Origin: "https://startmyloveengine.com",
+      Referer: "https://startmyloveengine.com/profile",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ vendor, type, url })
+  });
 
   return worker.fetch(request, env);
 };
