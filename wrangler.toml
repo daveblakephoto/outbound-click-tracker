@@ -27,6 +27,7 @@ ANALYTICS_SITE = "startmyloveengine"
 ANALYTICS_ENGINE_DATASET = "analytics_events"
 ANALYTICS_ENGINE_ACCOUNT_ID = "cc228d085f9d2bc113bc0a78dd2ea537"
 SITE_MAP_JSON = "{\"smle.mocha.app\":\"startmyloveengine\",\"go.startmyloveengine.com\":\"startmyloveengine\",\"startmyloveengine.com\":\"startmyloveengine\"}"
+ANALYTICS_CACHE = "1"
 
 workers_dev = false
 preview_urls = false
@@ -47,6 +48,7 @@ ANALYTICS_SITE = "startmyloveengine"
 ANALYTICS_ENGINE_DATASET = "analytics_events"
 ANALYTICS_ENGINE_ACCOUNT_ID = "cc228d085f9d2bc113bc0a78dd2ea537"
 SITE_MAP_JSON = "{\"smle.mocha.app\":\"startmyloveengine\",\"go.startmyloveengine.com\":\"startmyloveengine\",\"startmyloveengine.com\":\"startmyloveengine\"}"
+ANALYTICS_CACHE = "1"
 
 [[env.production.analytics_engine_datasets]]
 binding = "ANALYTICS_ENGINE"

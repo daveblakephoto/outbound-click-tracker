@@ -286,7 +286,10 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   range,
   dates,
   statsTimingEnabled,
-  statsRay
+  statsRay,
+  cacheControl,
+  dataSource = "ae",
+  dataWarning
 }: {
   env: any;
   site: string;
@@ -294,6 +297,9 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   dates: string[];
   statsTimingEnabled: boolean;
   statsRay?: string | null;
+  cacheControl?: string;
+  dataSource?: string;
+  dataWarning?: string;
 }) => {
   const datasetIdent = getAnalyticsDatasetIdentifier(env);
   const startDate = dates[0];
@@ -548,7 +554,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     total: dailyUniqueViews[date] || 0
   }));
 
-  const payload = {
+  const payload: Record<string, unknown> = {
     site,
     range,
     contractVersion: CONTRACT_VERSION,
@@ -559,11 +565,23 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     dailyUniqueViews: dailyUniqueViewTotals,
     tierViews
   };
+  if (dataSource) {
+    payload.dataSource = dataSource;
+  }
+  if (dataWarning) {
+    payload.dataWarning = dataWarning;
+  }
 
   const responseHeaders = new Headers({
     "Content-Type": "application/json",
-    "Cache-Control": "no-store"
+    "Cache-Control": cacheControl || "no-store"
   });
+  if (dataSource) {
+    responseHeaders.set(DATA_SOURCE_HEADER, dataSource);
+  }
+  if (dataWarning) {
+    responseHeaders.set(DATA_WARNING_HEADER, dataWarning);
+  }
 
   if (statsTimingEnabled) {
     const totalMs = Object.values(timings).reduce(
@@ -778,6 +796,18 @@ const RANGE_DAY_MAP = (() => {
 
 const getRangeDays = range => RANGE_DAY_MAP[range] || 0;
 const MAX_RANGE_DAYS = 90;
+const STATS_CACHE_TTL_SECONDS = 60;
+const EXPORT_CACHE_TTL_SECONDS = 600;
+
+const isAnalyticsCacheEnabled = (env: any) =>
+  env.ANALYTICS_CACHE === "1";
+
+const getCacheControlValue = (enabled: boolean, ttlSeconds: number) =>
+  enabled ? `private, max-age=${ttlSeconds}` : "no-store";
+
+const DATA_SOURCE_HEADER = "X-Data-Source";
+const DATA_WARNING_HEADER = "X-Data-Warning";
+const CACHE_STATUS_HEADER = "X-Cache";
 const parseRangeDays = (range: string) => {
   const match = /^(\d+)d$/.exec(range);
   if (!match) return 0;
@@ -993,7 +1023,13 @@ const getExportCorsHeaders = request => {
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Max-Age": "86400"
+    "Access-Control-Max-Age": "86400",
+    "Access-Control-Expose-Headers": [
+      DATA_SOURCE_HEADER,
+      DATA_WARNING_HEADER,
+      CACHE_STATUS_HEADER,
+      "Server-Timing"
+    ].join(", ")
   };
 };
 
@@ -1769,23 +1805,62 @@ export default {
         return new Response("Unknown site", { status: 404 });
       }
 
+      const cacheEnabled = isAnalyticsCacheEnabled(env);
+      const cacheControl = getCacheControlValue(
+        cacheEnabled,
+        STATS_CACHE_TTL_SECONDS
+      );
+      let cacheKey: Request | null = null;
+      if (cacheEnabled) {
+        const cacheUrl = new URL(request.url);
+        cacheUrl.searchParams.set("site", site);
+        cacheUrl.searchParams.set("range", range);
+        cacheKey = new Request(cacheUrl.toString(), { method: "GET" });
+        const cached = await caches.default.match(cacheKey);
+        if (cached) {
+          const cachedResponse = new Response(cached.body, cached);
+          cachedResponse.headers.set(CACHE_STATUS_HEADER, "HIT");
+          return cachedResponse;
+        }
+      }
+
+      let dataWarning: string | undefined;
+      let response: Response | null = null;
       if (analyticsEngineConfigured(env)) {
         try {
           console.log("stats:ae", { cached: false, range, site });
-          return await buildStatsResponseFromAnalyticsEngine({
+          response = await buildStatsResponseFromAnalyticsEngine({
             env,
             site,
             range,
             dates,
             statsTimingEnabled,
-            statsRay
+            statsRay,
+            cacheControl,
+            dataSource: "ae"
           });
         } catch (error) {
+          dataWarning = "ae_failed";
           console.error("stats:analytics-engine-failed", error);
-          return new Response("service_unavailable", { status: 502 });
         }
       }
-      console.log("stats:kv", { cached: false, range, site });
+
+      if (response) {
+        if (cacheEnabled) {
+          response.headers.set(CACHE_STATUS_HEADER, "MISS");
+          if (cacheKey && response.status === 200 && !dataWarning) {
+            await caches.default.put(cacheKey, response.clone());
+          }
+        }
+        return response;
+      }
+
+      console.log("stats:kv", {
+        cached: false,
+        range,
+        site,
+        fallback: dataWarning ? "ae_failed" : undefined
+      });
 
       const vendorAgg = {};
       const viewAgg = {};
@@ -2094,7 +2169,7 @@ export default {
         total: dailyUniqueViews[date] || 0
       }));
 
-      const payload = {
+      const payload: Record<string, unknown> = {
         site,
         range,
         contractVersion: CONTRACT_VERSION,
@@ -2103,8 +2178,12 @@ export default {
         daily,
         dailyViews: dailyViewTotals,
         dailyUniqueViews: dailyUniqueViewTotals,
-        tierViews
+        tierViews,
+        dataSource: "kv"
       };
+      if (dataWarning) {
+        payload.dataWarning = dataWarning;
+      }
       let body;
       if (statsTimingEnabled) {
         const serializeStart = performance.now();
@@ -2141,15 +2220,26 @@ export default {
       }
       const responseHeaders = new Headers({
         "Content-Type": "application/json",
-        "Cache-Control": "no-store"
+        "Cache-Control": cacheControl
       });
+      responseHeaders.set(DATA_SOURCE_HEADER, "kv");
+      if (dataWarning) {
+        responseHeaders.set(DATA_WARNING_HEADER, dataWarning);
+      }
       if (statsTimingHeader) {
         responseHeaders.set("Server-Timing", statsTimingHeader);
       }
-      return new Response(body, {
+      const kvResponse = new Response(body, {
         status: 200,
         headers: responseHeaders
       });
+      if (cacheEnabled) {
+        kvResponse.headers.set(CACHE_STATUS_HEADER, "MISS");
+        if (cacheKey && kvResponse.status === 200 && !dataWarning) {
+          await caches.default.put(cacheKey, kvResponse.clone());
+        }
+      }
+      return kvResponse;
     }
 
     /* ----------------------------
@@ -2238,6 +2328,27 @@ export default {
         }
       }
 
+      const cacheEnabled = isAnalyticsCacheEnabled(env);
+      const cacheControl = getCacheControlValue(
+        cacheEnabled,
+        EXPORT_CACHE_TTL_SECONDS
+      );
+      let cacheKey: Request | null = null;
+      if (cacheEnabled) {
+        const cacheUrl = new URL(request.url);
+        cacheUrl.searchParams.set("site", analyticsSite);
+        cacheUrl.searchParams.set("vendor", vendor);
+        cacheUrl.searchParams.set("range", range);
+        cacheKey = new Request(cacheUrl.toString(), { method: "GET" });
+        const cached = await caches.default.match(cacheKey);
+        if (cached) {
+          const cachedResponse = new Response(cached.body, cached);
+          cachedResponse.headers.set(CACHE_STATUS_HEADER, "HIT");
+          return cachedResponse;
+        }
+      }
+
+      let dataWarning: string | undefined;
       if (analyticsEngineConfigured(env)) {
         try {
           console.log("export:ae", {
@@ -2253,26 +2364,32 @@ export default {
             dates
           });
 
-          return new Response(csv, {
-            headers: {
-              "Content-Type": "text/csv; charset=utf-8",
-              "Cache-Control": "no-store",
-              ...corsHeaders
+          const responseHeaders = new Headers({
+            "Content-Type": "text/csv; charset=utf-8",
+            "Cache-Control": cacheControl,
+            ...corsHeaders
+          });
+          responseHeaders.set(DATA_SOURCE_HEADER, "ae");
+
+          const aeResponse = new Response(csv, { headers: responseHeaders });
+          if (cacheEnabled) {
+            aeResponse.headers.set(CACHE_STATUS_HEADER, "MISS");
+            if (cacheKey && aeResponse.status === 200 && !dataWarning) {
+              await caches.default.put(cacheKey, aeResponse.clone());
             }
-          });
+          }
+          return aeResponse;
         } catch (error) {
+          dataWarning = "ae_failed";
           console.error("vendor-export:analytics-engine-failed", error);
-          return new Response("service_unavailable", {
-            status: 502,
-            headers: corsHeaders
-          });
         }
       }
       console.log("export:kv", {
         cached: false,
         range,
         site: analyticsSite,
-        vendor
+        vendor,
+        fallback: dataWarning ? "ae_failed" : undefined
       });
 
       const perDate = Object.fromEntries(
@@ -2350,13 +2467,120 @@ export default {
       });
       const csv = `${header}${rows.join("\n")}\n`;
 
-      return new Response(csv, {
-        headers: {
-          "Content-Type": "text/csv; charset=utf-8",
-          "Cache-Control": "no-store",
-          ...corsHeaders
-        }
+      const responseHeaders = new Headers({
+        "Content-Type": "text/csv; charset=utf-8",
+        "Cache-Control": cacheControl,
+        ...corsHeaders
       });
+      responseHeaders.set(DATA_SOURCE_HEADER, "kv");
+      if (dataWarning) {
+        responseHeaders.set(DATA_WARNING_HEADER, dataWarning);
+      }
+
+      const kvResponse = new Response(csv, { headers: responseHeaders });
+      if (cacheEnabled) {
+        kvResponse.headers.set(CACHE_STATUS_HEADER, "MISS");
+        if (cacheKey && kvResponse.status === 200 && !dataWarning) {
+          await caches.default.put(cacheKey, kvResponse.clone());
+        }
+      }
+      return kvResponse;
+    }
+
+    /* ----------------------------
+       ANALYTICS ENGINE HEALTH (AUTHENTICATED)
+       ---------------------------- */
+    if (url.pathname === "/api/health/analytics-engine") {
+      const corsHeaders = getExportCorsHeaders(request);
+
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", {
+          status: 405,
+          headers: { Allow: "GET, OPTIONS", ...corsHeaders }
+        });
+      }
+
+      const auth = request.headers.get("Authorization");
+      if (auth !== `Bearer ${env.ANALYTICS_API_TOKEN}`) {
+        return new Response("Unauthorized", {
+          status: 401,
+          headers: corsHeaders
+        });
+      }
+
+      if (!analyticsEngineConfigured(env)) {
+        return new Response(
+          JSON.stringify({
+            status: "unconfigured",
+            generatedAt: new Date().toISOString()
+          }),
+          {
+            status: 503,
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "no-store",
+              ...corsHeaders
+            }
+          }
+        );
+      }
+
+      const datasetIdent = getAnalyticsDatasetIdentifier(env);
+      const started = performance.now();
+      try {
+        const rows = await analyticsEngineQuery(
+          env,
+          `SELECT blob1 FROM ${datasetIdent} LIMIT 1 FORMAT JSON`
+        );
+        const latencyMs = Math.round(performance.now() - started);
+        console.log("health:ae", {
+          status: "ok",
+          latencyMs,
+          rows: rows.length
+        });
+
+        return new Response(
+          JSON.stringify({
+            status: "ok",
+            dataset: datasetIdent,
+            rows: rows.length,
+            latencyMs,
+            generatedAt: new Date().toISOString()
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "no-store",
+              ...corsHeaders
+            }
+          }
+        );
+      } catch (error) {
+        const latencyMs = Math.round(performance.now() - started);
+        console.error("health:ae-failed", error);
+        return new Response(
+          JSON.stringify({
+            status: "error",
+            dataset: datasetIdent,
+            latencyMs,
+            error: String(error?.message || error),
+            generatedAt: new Date().toISOString()
+          }),
+          {
+            status: 503,
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "no-store",
+              ...corsHeaders
+            }
+          }
+        );
+      }
     }
 
     /* ----------------------------

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, expect, test, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import worker from "../src/worker";
 
@@ -44,6 +44,8 @@ test("returns current stats", async () => {
   expect(response.status).toBe(200);
 
   const json = await response.json();
+  expect(json.dataSource).toBe("kv");
+  expect(response.headers.get("X-Data-Source")).toBe("kv");
   expect(json.vendors.length).toBeGreaterThan(0);
   const vendor = json.vendors.find((row: any) => row.vendor === "dave-blake");
   expect(vendor.plan).toBe("featured");
@@ -112,6 +114,44 @@ test("rejects range larger than 90d", async () => {
   const response = await worker.fetch(request, env);
   expect(response.status).toBe(400);
   expect(await response.text()).toMatch(/Max range is 90 days/);
+});
+
+test("falls back to KV when analytics engine fails", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  await CLICKS.put(`dave-blake:website:${today}`, "2");
+
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
+    {
+      headers: { Authorization: "Bearer test-secret" }
+    }
+  );
+
+  const env = {
+    CLICKS,
+    ANALYTICS_API_TOKEN: "test-secret",
+    ANALYTICS_ENGINE_ACCOUNT_ID: "acct",
+    ANALYTICS_ENGINE_API_TOKEN: "token",
+    ANALYTICS_ENGINE_DATASET: "analytics_events"
+  } as any;
+
+  const fetchSpy = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue({
+      ok: false,
+      status: 422,
+      text: async () => "sql parser error"
+    } as any);
+
+  const response = await worker.fetch(request, env);
+  fetchSpy.mockRestore();
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("X-Data-Source")).toBe("kv");
+  expect(response.headers.get("X-Data-Warning")).toBe("ae_failed");
+  const json = await response.json();
+  expect(json.dataSource).toBe("kv");
+  expect(json.dataWarning).toBe("ae_failed");
 });
 
 test("returns tier views", async () => {
