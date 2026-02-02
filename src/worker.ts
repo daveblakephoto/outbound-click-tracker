@@ -232,6 +232,16 @@ const getAnalyticsDatasetName = (env: any) => {
   return "";
 };
 
+const getAnalyticsDatasetIdentifier = (env: any) => {
+  const datasetName = getAnalyticsDatasetName(env);
+  if (!/^[A-Za-z0-9_]+$/.test(datasetName)) {
+    throw new Error(
+      "Analytics Engine dataset name must be alphanumeric/underscore"
+    );
+  }
+  return datasetName;
+};
+
 const analyticsEngineConfigured = (env: any) =>
   Boolean(
     env.ANALYTICS_ENGINE_ACCOUNT_ID &&
@@ -285,8 +295,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   statsTimingEnabled: boolean;
   statsRay?: string | null;
 }) => {
-  const datasetName = getAnalyticsDatasetName(env);
-  const datasetIdent = `\`${datasetName.replace(/`/g, "")}\``;
+  const datasetIdent = getAnalyticsDatasetIdentifier(env);
   const startDate = dates[0];
   const endDate = dates[dates.length - 1];
   const baseWhere = `WHERE blob2 = ${sqlString(site)} AND blob11 >= ${sqlString(
@@ -594,8 +603,7 @@ const buildVendorCsvFromAnalyticsEngine = async ({
   vendor: string;
   dates: string[];
 }) => {
-  const datasetName = getAnalyticsDatasetName(env);
-  const datasetIdent = `\`${datasetName.replace(/`/g, "")}\``;
+  const datasetIdent = getAnalyticsDatasetIdentifier(env);
   const startDate = dates[0];
   const endDate = dates[dates.length - 1];
   const baseWhere = `WHERE blob2 = ${sqlString(site)} AND blob3 = ${sqlString(
