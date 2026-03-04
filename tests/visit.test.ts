@@ -180,6 +180,53 @@ test("records localhost source context and mobile device class", async () => {
   expect(viewEvent.blobs[18]).toBe("email");
 });
 
+test("falls back to single Analytics Engine index when dual-index write fails", async () => {
+  const writes: any[] = [];
+  const payload = {
+    site: "dave-blake.com",
+    vendor: "vivbne26",
+    page: "agency-rates",
+    tier: "featured",
+    plan: "featured",
+    city: "brisbane",
+    agency_slug: "viviens-brisbane",
+    page_type: "agency-rates",
+    url: "https://dave-blake.com/models/agency-rates/?agency=VIVBNE26",
+    referrer: "https://dave-blake.com/models/"
+  };
+
+  const request = new Request("https://example.com/visit", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.16",
+      "user-agent": "test-agent"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const env = {
+    CLICKS,
+    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com",
+    ANALYTICS_ENGINE: {
+      writeDataPoint(point) {
+        if (Array.isArray(point.indexes) && point.indexes.length !== 1) {
+          throw new Error("AE index mismatch: expected single index");
+        }
+        writes.push(point);
+      }
+    }
+  } as any;
+
+  const response = await worker.fetch(request, env);
+  expect(response.status).toBe(204);
+  expect(writes.length).toBeGreaterThan(0);
+  for (const point of writes) {
+    expect(point.indexes.length).toBe(1);
+  }
+});
+
 test("non-metadata sites keep provided plan for unknown vendors", async () => {
   const today = new Date().toISOString().slice(0, 10);
   const payload = {

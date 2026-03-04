@@ -90,6 +90,8 @@ const ANALYTICS_BLOBS = {
 } as const;
 
 const ANALYTICS_BLOB_COUNT = 19;
+let analyticsIndexMode: "dual" | "single" = "dual";
+let analyticsIndexFallbackLogged = false;
 
 const buildAnalyticsBlobs = (fields: AnalyticsEventFields) => {
   const blobs = new Array(ANALYTICS_BLOB_COUNT).fill("");
@@ -121,15 +123,54 @@ const writeAnalyticsEvent = (
 ) => {
   const dataset = env.ANALYTICS_ENGINE as AnalyticsEngineDataset | undefined;
   if (!dataset) return;
+
+  const basePoint = {
+    blobs: buildAnalyticsBlobs(fields),
+    doubles: [1]
+  };
+
+  const dualIndexes = [fields.site || "unknown", fields.vendor || "unknown"];
+  const singleIndex = [fields.vendor || "unknown"];
+
   try {
+    if (analyticsIndexMode === "single") {
+      dataset.writeDataPoint({
+        ...basePoint,
+        indexes: singleIndex
+      });
+      return;
+    }
+
     dataset.writeDataPoint({
-      indexes: [fields.site || "unknown", fields.vendor || "unknown"],
-      blobs: buildAnalyticsBlobs(fields),
-      doubles: [1]
+      ...basePoint,
+      indexes: dualIndexes
     });
   } catch (error) {
+    if (analyticsIndexMode === "dual") {
+      try {
+        dataset.writeDataPoint({
+          ...basePoint,
+          indexes: singleIndex
+        });
+        analyticsIndexMode = "single";
+        if (!analyticsIndexFallbackLogged) {
+          console.warn("analytics:index-fallback-to-single");
+          analyticsIndexFallbackLogged = true;
+        }
+        return;
+      } catch (fallbackError) {
+        if (env.DEBUG_STATS === "1") {
+          console.warn("analytics:write-failed", {
+            primary: String(error),
+            fallback: String(fallbackError)
+          });
+        }
+        return;
+      }
+    }
+
     if (env.DEBUG_STATS === "1") {
-      console.warn("analytics:write-failed", error);
+      console.warn("analytics:write-failed", String(error));
     }
   }
 };
