@@ -125,6 +125,7 @@ test("records city, agency_slug, and page_type in analytics blobs", async () => 
   expect(viewEvent).toBeTruthy();
   expect(viewEvent.blobs[1]).toBe("dave-blake.com");
   expect(viewEvent.blobs[4]).toBe("featured");
+  expect(viewEvent.blobs[5]).toBe("");
   expect(viewEvent.blobs[12]).toBe("brisbane");
   expect(viewEvent.blobs[13]).toBe("viviens-brisbane");
   expect(viewEvent.blobs[14]).toBe("agency-rates");
@@ -177,7 +178,7 @@ test("records localhost source context and mobile device class", async () => {
   expect(viewEvent.blobs[15]).toBe("localhost");
   expect(viewEvent.blobs[16]).toBe("localhost");
   expect(viewEvent.blobs[17]).toBe("mobile");
-  expect(viewEvent.blobs[18]).toBe("email");
+  expect(viewEvent.blobs[18]).toBe("direct");
 });
 
 test("falls back to single Analytics Engine index when dual-index write fails", async () => {

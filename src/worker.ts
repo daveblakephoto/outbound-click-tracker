@@ -1162,18 +1162,24 @@ const classifyDeviceClass = (userAgent: string) => {
 };
 
 const classifyRefChannel = ({
-  sourceUrl,
+  explicitRefChannel,
   hasReferrer,
   isInternalReferrer
 }: {
-  sourceUrl: URL | null;
+  explicitRefChannel: string;
   hasReferrer: boolean;
   isInternalReferrer: boolean;
 }) => {
-  const utmMedium =
-    sourceUrl?.searchParams.get("utm_medium")?.trim().toLowerCase() || "";
-  if (/(^|[^a-z])(email|newsletter|edm|e-mail)([^a-z]|$)/i.test(utmMedium)) {
-    return "email";
+  if (explicitRefChannel === "email") return "email";
+  if (explicitRefChannel === "internal") return "internal";
+  if (explicitRefChannel === "external") return "external";
+  if (explicitRefChannel === "direct") return "direct";
+  if (explicitRefChannel === "unknown") return "unknown";
+
+  // Default heuristic without forcing channel from URL params.
+  // Email should be explicit in payload when intentionally tagged upstream.
+  if (explicitRefChannel) {
+    return "unknown";
   }
   if (!hasReferrer) return "direct";
   return isInternalReferrer ? "internal" : "external";
@@ -1897,6 +1903,14 @@ export default {
       let refScope: "int" | "ext" | "" = "";
       let refBucket = "";
       let refChannel = "direct";
+      const explicitRefChannel =
+        typeof payload.ref_channel === "string"
+          ? payload.ref_channel.trim().toLowerCase()
+          : typeof payload.refChannel === "string"
+            ? payload.refChannel.trim().toLowerCase()
+            : "";
+      const legacyTierForAnalytics =
+        validation.tier && validation.tier !== plan ? validation.tier : "";
 
       if (referrer && referrer.length <= MAX_REFERRER_LENGTH) {
         let refUrl;
@@ -1924,7 +1938,7 @@ export default {
       }
 
       refChannel = classifyRefChannel({
-        sourceUrl,
+        explicitRefChannel,
         hasReferrer: Boolean(refScope),
         isInternalReferrer: refScope === "int"
       });
@@ -1935,7 +1949,7 @@ export default {
         vendor,
         page,
         plan,
-        legacyTier,
+        legacyTier: legacyTierForAnalytics,
         city,
         agencySlug,
         pageType,
@@ -1959,7 +1973,7 @@ export default {
           vendor,
           page,
           plan,
-          legacyTier,
+          legacyTier: legacyTierForAnalytics,
           city,
           agencySlug,
           pageType,
@@ -1993,7 +2007,7 @@ export default {
           placement,
           page,
           plan,
-          legacyTier,
+          legacyTier: legacyTierForAnalytics,
           city,
           agencySlug,
           pageType,
@@ -2013,7 +2027,7 @@ export default {
           vendor,
           page,
           plan,
-          legacyTier,
+          legacyTier: legacyTierForAnalytics,
           city,
           agencySlug,
           pageType,
