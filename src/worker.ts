@@ -56,7 +56,6 @@ type AnalyticsEventFields = {
   agencySlug?: string;
   pageType?: string;
   sourceHost?: string;
-  sourceEnv?: string;
   deviceClass?: string;
   refChannel?: string;
   eventContext?: string;
@@ -113,7 +112,8 @@ const buildAnalyticsBlobs = (fields: AnalyticsEventFields) => {
   blobs[ANALYTICS_BLOBS.AGENCY_SLUG] = fields.agencySlug || "";
   blobs[ANALYTICS_BLOBS.PAGE_TYPE] = fields.pageType || "";
   blobs[ANALYTICS_BLOBS.SOURCE_HOST] = fields.sourceHost || "";
-  blobs[ANALYTICS_BLOBS.SOURCE_ENV] = fields.sourceEnv || "";
+  // Reserved for backward-compatibility with historic blob position.
+  blobs[ANALYTICS_BLOBS.SOURCE_ENV] = "";
   blobs[ANALYTICS_BLOBS.DEVICE_CLASS] = fields.deviceClass || "";
   blobs[ANALYTICS_BLOBS.REF_CHANNEL] = fields.refChannel || "";
   blobs[ANALYTICS_BLOBS.EVENT_CONTEXT] = fields.eventContext || "";
@@ -1134,23 +1134,6 @@ const getSourceHostFromUrl = (sourceUrl: URL | null) => {
   return hostname;
 };
 
-const classifySourceEnvironment = (sourceHost: string) => {
-  if (!sourceHost) return "unknown";
-  if (sourceHost === "localhost" || sourceHost === "127.0.0.1") {
-    return "localhost";
-  }
-  if (sourceHost.startsWith("staging.")) {
-    return "staging";
-  }
-  if (
-    sourceHost === "dave-blake.com" ||
-    sourceHost === "startmyloveengine.com"
-  ) {
-    return "production";
-  }
-  return "external";
-};
-
 const classifyDeviceClass = (userAgent: string) => {
   const ua = (userAgent || "").toLowerCase();
   if (!ua) return "unknown";
@@ -1203,14 +1186,12 @@ const sanitizeCustomContext = (value: unknown) => {
 const buildEventContext = ({
   sourcePath,
   sourceQuery,
-  sourceEnv,
   platform,
   referrerDomain,
   customContext
 }: {
   sourcePath: string;
   sourceQuery: string;
-  sourceEnv: string;
   platform: string;
   referrerDomain: string;
   customContext: Record<string, string>;
@@ -1218,7 +1199,6 @@ const buildEventContext = ({
   const context = {
     sourcePath: sourcePath || "",
     sourceQuery: sourceQuery || "",
-    sourceEnv: sourceEnv || "",
     platform: platform || "unknown",
     referrerDomain: referrerDomain || "",
     custom: customContext
@@ -1527,7 +1507,7 @@ const validateVisitPayload = (input, allowlists) => {
           .filter(Boolean)
       : [];
 
-  if (!safeVendor || !safePage || (!safeTier && !safePlan)) {
+  if (!safeVendor || !safePage) {
     return { ok: false, error: "Missing parameters" };
   }
 
@@ -1591,25 +1571,36 @@ const validateVisitPayload = (input, allowlists) => {
 
 const resolvePlanAndPlacements = (
   validation,
+  metadataEnforced: boolean,
   vendorPlanHint?: string
 ) => {
   let plan = validation.plan;
   const tier = validation.tier;
   let placements = [...(validation.placements || [])];
 
-  if (!plan && tier) {
-    const mapped = mapLegacyTier(tier);
-    plan = mapped.plan;
-    placements.push(...mapped.placements);
-  }
+  if (metadataEnforced) {
+    if (!plan && tier) {
+      const mapped = mapLegacyTier(tier);
+      plan = mapped.plan;
+      placements.push(...mapped.placements);
+    }
 
-  if (!plan) {
-    return { ok: false, error: "Missing plan" };
-  }
+    if (!plan) {
+      return { ok: false, error: "Missing plan" };
+    }
 
-  const allowedPlanSet = new Set([...ALLOWED_PLANS, "unknown"]);
-  if (!allowedPlanSet.has(plan)) {
-    return { ok: false, error: "Invalid plan" };
+    const allowedPlanSet = new Set([...ALLOWED_PLANS, "unknown"]);
+    if (!allowedPlanSet.has(plan)) {
+      return { ok: false, error: "Invalid plan" };
+    }
+  } else {
+    if (!plan) {
+      plan = "unknown";
+    }
+
+    if (plan !== "unknown" && !ALLOWED_PLANS.has(plan)) {
+      return { ok: false, error: "Invalid plan" };
+    }
   }
 
   placements = Array.from(
@@ -1618,7 +1609,7 @@ const resolvePlanAndPlacements = (
     )
   );
 
-  const legacyTier = tier || plan;
+  const legacyTier = metadataEnforced ? tier || plan : "";
 
   return { ok: true, plan, placements, legacyTier };
 };
@@ -1924,6 +1915,7 @@ export default {
           : "";
       const resolvedPlan = resolvePlanAndPlacements(
         validation,
+        metadataEnforced,
         vendorPlanHint
       );
       if (!resolvedPlan.ok) {
@@ -1960,7 +1952,6 @@ export default {
 
       const sourceUrl = getSafeUrl(payload.url);
       const sourceHost = getSourceHostFromUrl(sourceUrl);
-      const sourceEnv = classifySourceEnvironment(sourceHost);
       const sourcePath = sourceUrl?.pathname || "";
       const sourceQuery = sourceUrl?.search ? sourceUrl.search.slice(1) : "";
       const ip =
@@ -2033,7 +2024,6 @@ export default {
       const eventContext = buildEventContext({
         sourcePath,
         sourceQuery,
-        sourceEnv,
         platform,
         referrerDomain,
         customContext
@@ -2050,7 +2040,6 @@ export default {
         agencySlug,
         pageType,
         sourceHost,
-        sourceEnv,
         deviceClass,
         refChannel,
         eventContext,
@@ -2075,7 +2064,6 @@ export default {
           agencySlug,
           pageType,
           sourceHost,
-          sourceEnv,
           deviceClass,
           refChannel,
           eventContext,
@@ -2085,8 +2073,10 @@ export default {
 
       await incrementCounter(env, `view:${vendor}:${date}`);
       await incrementCounter(env, `pview:${vendor}:${page}:${date}`);
-      await incrementCounter(env, `tview:${legacyTier}:${date}`);
-      await incrementCounter(env, `tview:${vendor}:${legacyTier}:${date}`);
+      if (legacyTier) {
+        await incrementCounter(env, `tview:${legacyTier}:${date}`);
+        await incrementCounter(env, `tview:${vendor}:${legacyTier}:${date}`);
+      }
       await incrementCounter(env, `planview:${plan}:${date}`);
       await incrementCounter(env, `planview:${vendor}:${plan}:${date}`);
 
@@ -2110,7 +2100,6 @@ export default {
           agencySlug,
           pageType,
           sourceHost,
-          sourceEnv,
           deviceClass,
           refChannel,
           eventContext,
@@ -2131,7 +2120,6 @@ export default {
           agencySlug,
           pageType,
           sourceHost,
-          sourceEnv,
           deviceClass,
           refChannel,
           eventContext,
