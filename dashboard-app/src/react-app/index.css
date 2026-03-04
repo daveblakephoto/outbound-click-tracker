@@ -1,0 +1,315 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+}
+
+/* ==========================================================================
+   Mobile Responsive Styles
+   Breakpoints: ≤480px (phones), 481-768px (large phones/small tablets)
+   ========================================================================== */
+
+/* Typography: Increase line-height on mobile for readability */
+@media (max-width: 768px) {
+  body {
+    line-height: 1.5;
+  }
+  
+  /* Reduce side padding on mobile */
+  .dashboard-container {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
+
+/* ==========================================================================
+   KPI Row - Mobile 2-column layout
+   ========================================================================== */
+
+/* Mobile: Stack KPIs in 2-column grid */
+@media (max-width: 768px) {
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+  }
+  
+  /* Reduce KPI number size by ~12% on mobile */
+  .kpi-value {
+    font-size: 2rem; /* down from 2.25rem */
+  }
+  
+  /* CTR row spans full width at bottom */
+  .kpi-ctr-row {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Small phones: tighter spacing */
+@media (max-width: 480px) {
+  .kpi-row {
+    gap: 12px;
+  }
+  
+  .kpi-value {
+    font-size: 1.75rem;
+  }
+}
+
+/* ==========================================================================
+   Engagement Funnel - Vertical stacked cards on mobile
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  .funnel-horizontal {
+    display: none;
+  }
+  
+  .funnel-vertical {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  
+  .funnel-step {
+    width: 100%;
+    padding: 16px;
+  }
+  
+  .funnel-arrow {
+    display: none; /* Hide arrows on mobile */
+  }
+  
+  .funnel-conversion {
+    text-align: center;
+    padding: 8px 0;
+    font-size: 0.875rem;
+    color: #525252;
+  }
+}
+
+@media (min-width: 769px) {
+  .funnel-vertical {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+   Engagement Quality Panel - 2x2 grid on mobile
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  .quality-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  
+  .quality-label-derived {
+    display: none; /* Hide "Derived metrics" label on small screens */
+  }
+  
+  .quality-info-row {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ==========================================================================
+   Performance Chart - Full width with improved mobile controls
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  .chart-container {
+    margin-left: -12px;
+    margin-right: -12px;
+    padding: 16px 12px;
+  }
+  
+  .chart-controls {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  
+  .chart-controls button {
+    padding: 8px 12px;
+    font-size: 0.75rem;
+  }
+  
+  /* Add padding for date labels */
+  .recharts-xAxis {
+    padding-bottom: 8px;
+  }
+}
+
+/* ==========================================================================
+   Vendor Table - Card layout on mobile
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  .vendor-table-desktop {
+    display: none;
+  }
+  
+  .vendor-cards-mobile {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .vendor-card {
+    border: 1px solid #e5e5e5;
+    padding: 16px;
+    background: white;
+  }
+  
+  .vendor-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  
+  .vendor-card-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    text-align: center;
+  }
+  
+  .vendor-card-stat-label {
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #737373;
+  }
+  
+  .vendor-card-stat-value {
+    font-size: 1rem;
+    font-weight: 500;
+    color: #171717;
+  }
+  
+  .vendor-card-placements {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #f5f5f5;
+  }
+}
+
+@media (min-width: 769px) {
+  .vendor-cards-mobile {
+    display: none;
+  }
+}
+
+/* Hide CTR column under 600px */
+@media (max-width: 600px) {
+  .vendor-ctr-column {
+    display: none;
+  }
+}
+
+/* Vendor table mobile text size reduction */
+@media (max-width: 768px) {
+  table th,
+  table td {
+    font-size: 0.75rem; /* 12px instead of 14px */
+    padding-left: 0.75rem; /* 12px instead of 24px */
+    padding-right: 0.75rem;
+    padding-top: 0.625rem; /* 10px instead of 12px */
+    padding-bottom: 0.625rem;
+  }
+  
+  table th {
+    font-size: 0.625rem; /* 10px for headers */
+  }
+}
+
+/* ==========================================================================
+   Filters Bar - Stacked on mobile with sticky behavior
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  .filters-bar {
+    flex-direction: column;
+    gap: 12px;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: white;
+    padding: 12px;
+    border-bottom: 1px solid #e5e5e5;
+  }
+  
+  .filters-bar select {
+    width: 100%;
+  }
+  
+  .filter-group {
+    width: 100%;
+  }
+  
+  .filter-group label {
+    margin-bottom: 4px;
+  }
+}
+
+/* ==========================================================================
+   Confidence Badge - Compact icon mode on mobile
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  .confidence-badge-full {
+    display: none;
+  }
+  
+  .confidence-badge-compact {
+    display: inline-flex;
+  }
+}
+
+@media (min-width: 769px) {
+  .confidence-badge-compact {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+   Traffic Sources Panel - Single column on mobile
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  .traffic-sources-grid {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+}
+
+/* ==========================================================================
+   Utility Classes for Mobile
+   ========================================================================== */
+
+.hide-mobile {
+  display: block;
+}
+
+.show-mobile {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .hide-mobile {
+    display: none;
+  }
+  
+  .show-mobile {
+    display: block;
+  }
+}
+
+/* Standardized card margins */
+@media (max-width: 768px) {
+  .dashboard-card {
+    margin-bottom: 16px;
+  }
+}

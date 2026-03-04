@@ -6,6 +6,8 @@
   "scripts": {
     "sync:analytics-config": "node scripts/sync-analytics-config.js",
     "sync:vendor-metadata": "node scripts/sync-vendor-metadata.js",
+    "dashboard:sync": "node scripts/mocha-dashboard-zip-sync.mjs",
+    "dashboard:watch": "node scripts/mocha-dashboard-zip-sync.mjs --watch",
     "predeploy": "npm run sync:analytics-config && bash scripts/predeploy-check.sh",
     "smoke": "bash scripts/smoke-check.sh",
     "test": "vitest run",
