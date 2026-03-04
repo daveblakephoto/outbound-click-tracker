@@ -128,6 +128,56 @@ test("records city, agency_slug, and page_type in analytics blobs", async () => 
   expect(viewEvent.blobs[12]).toBe("brisbane");
   expect(viewEvent.blobs[13]).toBe("viviens-brisbane");
   expect(viewEvent.blobs[14]).toBe("agency-rates");
+  expect(viewEvent.blobs[15]).toBe("dave-blake.com");
+  expect(viewEvent.blobs[16]).toBe("production");
+  expect(viewEvent.blobs[17]).toBe("desktop");
+  expect(viewEvent.blobs[18]).toBe("internal");
+});
+
+test("records localhost source context and mobile device class", async () => {
+  const analyticsWrites: any[] = [];
+  const payload = {
+    site: "dave-blake.com",
+    vendor: "dave-blake",
+    page: "agency-rates",
+    tier: "featured",
+    city: "brisbane",
+    agency_slug: "viviens-brisbane",
+    page_type: "agency-rates",
+    url: "http://localhost:4321/models/agency-rates/?agency=VIVBNE26&utm_medium=email"
+  };
+
+  const request = new Request("https://example.com/visit", {
+    method: "POST",
+    headers: {
+      Origin: "http://localhost:4321",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.15",
+      "user-agent":
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const env = {
+    CLICKS,
+    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com",
+    ANALYTICS_ENGINE: {
+      writeDataPoint(point) {
+        analyticsWrites.push(point);
+      }
+    }
+  } as any;
+
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(204);
+  const viewEvent = analyticsWrites.find(point => point?.blobs?.[0] === "view");
+  expect(viewEvent).toBeTruthy();
+  expect(viewEvent.blobs[15]).toBe("localhost");
+  expect(viewEvent.blobs[16]).toBe("localhost");
+  expect(viewEvent.blobs[17]).toBe("mobile");
+  expect(viewEvent.blobs[18]).toBe("email");
 });
 
 test("non-metadata sites keep provided plan for unknown vendors", async () => {

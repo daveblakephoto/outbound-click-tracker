@@ -55,6 +55,10 @@ type AnalyticsEventFields = {
   city?: string;
   agencySlug?: string;
   pageType?: string;
+  sourceHost?: string;
+  sourceEnv?: string;
+  deviceClass?: string;
+  refChannel?: string;
   clickType?: string;
   placement?: string;
   refScope?: "int" | "ext";
@@ -78,10 +82,14 @@ const ANALYTICS_BLOBS = {
   SIGNATURE: 11,
   CITY: 12,
   AGENCY_SLUG: 13,
-  PAGE_TYPE: 14
+  PAGE_TYPE: 14,
+  SOURCE_HOST: 15,
+  SOURCE_ENV: 16,
+  DEVICE_CLASS: 17,
+  REF_CHANNEL: 18
 } as const;
 
-const ANALYTICS_BLOB_COUNT = 15;
+const ANALYTICS_BLOB_COUNT = 19;
 
 const buildAnalyticsBlobs = (fields: AnalyticsEventFields) => {
   const blobs = new Array(ANALYTICS_BLOB_COUNT).fill("");
@@ -100,6 +108,10 @@ const buildAnalyticsBlobs = (fields: AnalyticsEventFields) => {
   blobs[ANALYTICS_BLOBS.CITY] = fields.city || "";
   blobs[ANALYTICS_BLOBS.AGENCY_SLUG] = fields.agencySlug || "";
   blobs[ANALYTICS_BLOBS.PAGE_TYPE] = fields.pageType || "";
+  blobs[ANALYTICS_BLOBS.SOURCE_HOST] = fields.sourceHost || "";
+  blobs[ANALYTICS_BLOBS.SOURCE_ENV] = fields.sourceEnv || "";
+  blobs[ANALYTICS_BLOBS.DEVICE_CLASS] = fields.deviceClass || "";
+  blobs[ANALYTICS_BLOBS.REF_CHANNEL] = fields.refChannel || "";
   return blobs;
 };
 
@@ -1060,6 +1072,72 @@ const normalizeHostname = hostname =>
 const isSafeHostname = hostname =>
   /^[a-z0-9.-]+$/.test(hostname) && hostname.length <= 253;
 
+const getSafeUrl = (value: unknown): URL | null => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 2048) return null;
+  try {
+    return new URL(trimmed);
+  } catch {
+    return null;
+  }
+};
+
+const getSourceHostFromUrl = (sourceUrl: URL | null) => {
+  if (!sourceUrl) return "";
+  const hostname = normalizeHostname(sourceUrl.hostname || "");
+  if (!hostname || !isSafeHostname(hostname)) return "";
+  return hostname;
+};
+
+const classifySourceEnvironment = (sourceHost: string) => {
+  if (!sourceHost) return "unknown";
+  if (sourceHost === "localhost" || sourceHost === "127.0.0.1") {
+    return "localhost";
+  }
+  if (sourceHost.startsWith("staging.")) {
+    return "staging";
+  }
+  if (
+    sourceHost === "dave-blake.com" ||
+    sourceHost === "startmyloveengine.com"
+  ) {
+    return "production";
+  }
+  return "external";
+};
+
+const classifyDeviceClass = (userAgent: string) => {
+  const ua = (userAgent || "").toLowerCase();
+  if (!ua) return "unknown";
+  if (/(bot|spider|crawler|headless|preview)/i.test(ua)) return "bot";
+  if (/(ipad|tablet|kindle|silk|playbook|nexus 7|nexus 9|sm-t)/i.test(ua)) {
+    return "tablet";
+  }
+  if (/(android|iphone|ipod|iemobile|blackberry|opera mini|mobile)/i.test(ua)) {
+    return "mobile";
+  }
+  return "desktop";
+};
+
+const classifyRefChannel = ({
+  sourceUrl,
+  hasReferrer,
+  isInternalReferrer
+}: {
+  sourceUrl: URL | null;
+  hasReferrer: boolean;
+  isInternalReferrer: boolean;
+}) => {
+  const utmMedium =
+    sourceUrl?.searchParams.get("utm_medium")?.trim().toLowerCase() || "";
+  if (/(^|[^a-z])(email|newsletter|edm|e-mail)([^a-z]|$)/i.test(utmMedium)) {
+    return "email";
+  }
+  if (!hasReferrer) return "direct";
+  return isInternalReferrer ? "internal" : "external";
+};
+
 const classifyInternalReferrer = pathname => {
   const path = pathname.toLowerCase().replace(/\/+$/, "") || "/";
   if (path === "/") return "home";
@@ -1760,6 +1838,56 @@ export default {
       if (env.DEBUG_VISITS === "1") {
         console.log("visit", { ...payload, plan, metaStatus });
       }
+
+      const sourceUrl = getSafeUrl(payload.url);
+      const sourceHost = getSourceHostFromUrl(sourceUrl);
+      const sourceEnv = classifySourceEnvironment(sourceHost);
+      const ip =
+        request.headers.get("cf-connecting-ip") ||
+        request.headers.get("x-forwarded-for") ||
+        "";
+      const userAgent = request.headers.get("user-agent") || "";
+      const deviceClass = classifyDeviceClass(userAgent);
+
+      const referrerValue =
+        typeof payload.referrer === "string" ? payload.referrer : "";
+      const headerReferrer = request.headers.get("referer") || "";
+      const referrer = referrerValue || headerReferrer;
+      let refScope: "int" | "ext" | "" = "";
+      let refBucket = "";
+      let refChannel = "direct";
+
+      if (referrer && referrer.length <= MAX_REFERRER_LENGTH) {
+        let refUrl;
+        try {
+          refUrl = new URL(referrer);
+        } catch {
+          refUrl = null;
+        }
+
+        if (refUrl) {
+          const hostname = normalizeHostname(refUrl.hostname);
+          if (hostname && isSafeHostname(hostname)) {
+            const isInternal = Array.from(INTERNAL_REFERRER_DOMAINS).some(
+              domain => hostname === domain || hostname.endsWith(`.${domain}`)
+            );
+            if (isInternal) {
+              refScope = "int";
+              refBucket = classifyInternalReferrer(refUrl.pathname);
+            } else {
+              refScope = "ext";
+              refBucket = hostname;
+            }
+          }
+        }
+      }
+
+      refChannel = classifyRefChannel({
+        sourceUrl,
+        hasReferrer: Boolean(refScope),
+        isInternalReferrer: refScope === "int"
+      });
+
       writeAnalyticsEvent(env, {
         eventType: ANALYTICS_EVENT_TYPES.VIEW,
         site: analyticsSite,
@@ -1770,14 +1898,13 @@ export default {
         city,
         agencySlug,
         pageType,
+        sourceHost,
+        sourceEnv,
+        deviceClass,
+        refChannel,
         date
       });
 
-      const ip =
-        request.headers.get("cf-connecting-ip") ||
-        request.headers.get("x-forwarded-for") ||
-        "";
-      const userAgent = request.headers.get("user-agent") || "";
       const fingerprint = await sha1Hex(`${ip}|${userAgent}|${vendor}`);
       const lockKey = `uviewlock:${vendor}:${fingerprint}`;
 
@@ -1795,6 +1922,10 @@ export default {
           city,
           agencySlug,
           pageType,
+          sourceHost,
+          sourceEnv,
+          deviceClass,
+          refChannel,
           date
         });
       }
@@ -1825,72 +1956,34 @@ export default {
           city,
           agencySlug,
           pageType,
+          sourceHost,
+          sourceEnv,
+          deviceClass,
+          refChannel,
           date
         });
       }
 
-      const referrerValue =
-        typeof payload.referrer === "string" ? payload.referrer : "";
-      const headerReferrer = request.headers.get("referer") || "";
-      const referrer = referrerValue || headerReferrer;
-
-      if (referrer && referrer.length <= MAX_REFERRER_LENGTH) {
-        let refUrl;
-        try {
-          refUrl = new URL(referrer);
-        } catch {
-          refUrl = null;
-        }
-
-        if (refUrl) {
-          const hostname = normalizeHostname(refUrl.hostname);
-          if (hostname && isSafeHostname(hostname)) {
-            const isInternal = Array.from(INTERNAL_REFERRER_DOMAINS).some(
-              domain => hostname === domain || hostname.endsWith(`.${domain}`)
-            );
-
-            if (isInternal) {
-              const bucket = classifyInternalReferrer(refUrl.pathname);
-              await incrementCounter(
-                env,
-                `ref:${vendor}:int:${bucket}:${date}`
-              );
-              writeAnalyticsEvent(env, {
-                eventType: ANALYTICS_EVENT_TYPES.REFERRER,
-                site: analyticsSite,
-                vendor,
-                page,
-                plan,
-                legacyTier,
-                city,
-                agencySlug,
-                pageType,
-                refScope: "int",
-                refBucket: bucket,
-                date
-              });
-            } else {
-              await incrementCounter(
-                env,
-                `ref:${vendor}:ext:${hostname}:${date}`
-              );
-              writeAnalyticsEvent(env, {
-                eventType: ANALYTICS_EVENT_TYPES.REFERRER,
-                site: analyticsSite,
-                vendor,
-                page,
-                plan,
-                legacyTier,
-                city,
-                agencySlug,
-                pageType,
-                refScope: "ext",
-                refBucket: hostname,
-                date
-              });
-            }
-          }
-        }
+      if (refScope && refBucket) {
+        await incrementCounter(env, `ref:${vendor}:${refScope}:${refBucket}:${date}`);
+        writeAnalyticsEvent(env, {
+          eventType: ANALYTICS_EVENT_TYPES.REFERRER,
+          site: analyticsSite,
+          vendor,
+          page,
+          plan,
+          legacyTier,
+          city,
+          agencySlug,
+          pageType,
+          sourceHost,
+          sourceEnv,
+          deviceClass,
+          refChannel,
+          refScope,
+          refBucket,
+          date
+        });
       }
 
       return new Response(null, { status: 204, headers: corsHeaders });
