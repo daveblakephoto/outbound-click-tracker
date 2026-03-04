@@ -6,22 +6,38 @@
     "featured",
     "basic",
     "unpaid",
-    "article"
+    "article",
+    "agency-rates"
   ],
   "allowedPlans": ["unpaid", "basic", "featured"],
   "allowedPlacements": ["spotlight", "editor_pick", "home_feature"],
   "allowedClickTypes": ["website", "instagram"],
-  "internalDomains": ["startmyloveengine.com", "go.startmyloveengine.com"],
+  "internalDomains": [
+    "startmyloveengine.com",
+    "go.startmyloveengine.com",
+    "dave-blake.com",
+    "staging.dave-blake.com"
+  ],
   "vendorSlugRegex": "^[a-z0-9-]+$",
   "defaultRanges": ["7d", "28d", "90d"],
   "cors": {
     "visitAllowedOrigins": [
       "https://startmyloveengine.com",
-      "https://www.startmyloveengine.com"
+      "https://www.startmyloveengine.com",
+      "https://dave-blake.com",
+      "https://www.dave-blake.com",
+      "https://staging.dave-blake.com",
+      "http://localhost:4321",
+      "http://127.0.0.1:4321"
     ],
     "exportAllowedOrigins": [
       "https://startmyloveengine.com",
-      "https://www.startmyloveengine.com"
+      "https://www.startmyloveengine.com",
+      "https://dave-blake.com",
+      "https://www.dave-blake.com",
+      "https://staging.dave-blake.com",
+      "http://localhost:4321",
+      "http://127.0.0.1:4321"
     ]
   },
   "endpoints": {

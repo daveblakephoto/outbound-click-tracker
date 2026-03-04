@@ -26,7 +26,8 @@ dataset = "analytics_events"
 ANALYTICS_SITE = "startmyloveengine"
 ANALYTICS_ENGINE_DATASET = "analytics_events"
 ANALYTICS_ENGINE_ACCOUNT_ID = "cc228d085f9d2bc113bc0a78dd2ea537"
-SITE_MAP_JSON = "{\"smle.mocha.app\":\"startmyloveengine\",\"go.startmyloveengine.com\":\"startmyloveengine\",\"startmyloveengine.com\":\"startmyloveengine\"}"
+SITE_MAP_JSON = "{\"smle.mocha.app\":\"startmyloveengine\",\"go.startmyloveengine.com\":\"startmyloveengine\",\"startmyloveengine.com\":\"startmyloveengine\",\"dave-blake.com\":\"dave-blake.com\",\"www.dave-blake.com\":\"dave-blake.com\",\"staging.dave-blake.com\":\"dave-blake.com\"}"
+SITE_ALLOWLIST = "startmyloveengine,dave-blake.com"
 ANALYTICS_CACHE = "1"
 
 workers_dev = false
@@ -47,7 +48,8 @@ r2_buckets = [
 ANALYTICS_SITE = "startmyloveengine"
 ANALYTICS_ENGINE_DATASET = "analytics_events"
 ANALYTICS_ENGINE_ACCOUNT_ID = "cc228d085f9d2bc113bc0a78dd2ea537"
-SITE_MAP_JSON = "{\"smle.mocha.app\":\"startmyloveengine\",\"go.startmyloveengine.com\":\"startmyloveengine\",\"startmyloveengine.com\":\"startmyloveengine\"}"
+SITE_MAP_JSON = "{\"smle.mocha.app\":\"startmyloveengine\",\"go.startmyloveengine.com\":\"startmyloveengine\",\"startmyloveengine.com\":\"startmyloveengine\",\"dave-blake.com\":\"dave-blake.com\",\"www.dave-blake.com\":\"dave-blake.com\",\"staging.dave-blake.com\":\"dave-blake.com\"}"
+SITE_ALLOWLIST = "startmyloveengine,dave-blake.com"
 ANALYTICS_CACHE = "1"
 
 [[env.production.analytics_engine_datasets]]

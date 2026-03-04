@@ -83,6 +83,89 @@ test("accepts unknown vendor and assigns unknown plan", async () => {
   expect(await CLICKS.get(`planview:unknown-vendor:unknown:${today}`)).toBe("1");
 });
 
+test("records city, agency_slug, and page_type in analytics blobs", async () => {
+  const analyticsWrites: any[] = [];
+  const payload = {
+    site: "dave-blake.com",
+    vendor: "dave-blake",
+    page: "agency-rates",
+    tier: "featured",
+    city: "brisbane",
+    agency_slug: "viviens-brisbane",
+    page_type: "agency-rates",
+    referrer: "https://dave-blake.com/models/",
+    url: "https://dave-blake.com/models/agency-rates/?agency=VIVBNE26"
+  };
+
+  const request = new Request("https://example.com/visit", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.12",
+      "user-agent": "test-agent"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const env = {
+    CLICKS,
+    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com",
+    ANALYTICS_ENGINE: {
+      writeDataPoint(point) {
+        analyticsWrites.push(point);
+      }
+    }
+  } as any;
+
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(204);
+  const viewEvent = analyticsWrites.find(point => point?.blobs?.[0] === "view");
+  expect(viewEvent).toBeTruthy();
+  expect(viewEvent.blobs[1]).toBe("dave-blake.com");
+  expect(viewEvent.blobs[4]).toBe("featured");
+  expect(viewEvent.blobs[12]).toBe("brisbane");
+  expect(viewEvent.blobs[13]).toBe("viviens-brisbane");
+  expect(viewEvent.blobs[14]).toBe("agency-rates");
+});
+
+test("non-metadata sites keep provided plan for unknown vendors", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const payload = {
+    site: "dave-blake.com",
+    vendor: "unknown-vendor",
+    page: "agency-rates",
+    tier: "featured",
+    plan: "featured",
+    referrer: "https://dave-blake.com/models/agency-rates/",
+    url: "https://dave-blake.com/models/agency-rates/?agency=VIVBNE26"
+  };
+
+  const request = new Request("https://example.com/visit", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.14",
+      "user-agent": "test-agent"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const env = {
+    CLICKS,
+    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com"
+  } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(204);
+  expect(await CLICKS.get(`planview:featured:${today}`)).toBe("1");
+  expect(await CLICKS.get(`planview:unknown-vendor:featured:${today}`)).toBe(
+    "1"
+  );
+});
+
 test("returns CORS headers on /visit preflight", async () => {
   const origin = "https://startmyloveengine.com";
   const request = new Request("https://example.com/visit", {
@@ -106,6 +189,23 @@ test("returns CORS headers on /visit preflight", async () => {
     "Content-Type, Authorization"
   );
   expect(response.headers.get("Access-Control-Max-Age")).toBe("86400");
+});
+
+test("returns CORS headers for dave-blake.com origin on /visit preflight", async () => {
+  const origin = "https://dave-blake.com";
+  const request = new Request("https://example.com/visit", {
+    method: "OPTIONS",
+    headers: {
+      Origin: origin,
+      "Access-Control-Request-Method": "POST"
+    }
+  });
+
+  const env = { CLICKS } as any;
+  const response = await worker.fetch(request, env);
+
+  expect(response.status).toBe(204);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
 });
 
 test("includes CORS headers on /visit errors", async () => {

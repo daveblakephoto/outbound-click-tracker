@@ -25,6 +25,7 @@ const CONTRACT = contractJson as {
 const CONTRACT_VERSION = CONTRACT.apiVersion || "1.0.0";
 
 const ANALYTICS_SITE_FALLBACK = "startmyloveengine";
+const METADATA_ENFORCED_SITE = "startmyloveengine";
 const ANALYTICS_EVENT_TYPES = {
   CLICK: "click",
   VIEW: "view",
@@ -51,6 +52,9 @@ type AnalyticsEventFields = {
   page?: string;
   plan?: string;
   legacyTier?: string;
+  city?: string;
+  agencySlug?: string;
+  pageType?: string;
   clickType?: string;
   placement?: string;
   refScope?: "int" | "ext";
@@ -71,10 +75,13 @@ const ANALYTICS_BLOBS = {
   REF_SCOPE: 8,
   REF_BUCKET: 9,
   DATE: 10,
-  SIGNATURE: 11
+  SIGNATURE: 11,
+  CITY: 12,
+  AGENCY_SLUG: 13,
+  PAGE_TYPE: 14
 } as const;
 
-const ANALYTICS_BLOB_COUNT = 12;
+const ANALYTICS_BLOB_COUNT = 15;
 
 const buildAnalyticsBlobs = (fields: AnalyticsEventFields) => {
   const blobs = new Array(ANALYTICS_BLOB_COUNT).fill("");
@@ -90,6 +97,9 @@ const buildAnalyticsBlobs = (fields: AnalyticsEventFields) => {
   blobs[ANALYTICS_BLOBS.REF_BUCKET] = fields.refBucket || "";
   blobs[ANALYTICS_BLOBS.DATE] = fields.date;
   blobs[ANALYTICS_BLOBS.SIGNATURE] = fields.signature || "";
+  blobs[ANALYTICS_BLOBS.CITY] = fields.city || "";
+  blobs[ANALYTICS_BLOBS.AGENCY_SLUG] = fields.agencySlug || "";
+  blobs[ANALYTICS_BLOBS.PAGE_TYPE] = fields.pageType || "";
   return blobs;
 };
 
@@ -101,7 +111,7 @@ const writeAnalyticsEvent = (
   if (!dataset) return;
   try {
     dataset.writeDataPoint({
-      indexes: [fields.vendor || "unknown"],
+      indexes: [fields.site || "unknown", fields.vendor || "unknown"],
       blobs: buildAnalyticsBlobs(fields),
       doubles: [1]
     });
@@ -116,7 +126,9 @@ const parseSiteSlug = (value: unknown) => {
   if (typeof value !== "string") return "";
   const normalized = value.trim().toLowerCase();
   if (!normalized) return "";
-  if (!/^[a-z0-9-]+$/.test(normalized)) return "";
+  if (!/^[a-z0-9.-]+$/.test(normalized)) return "";
+  if (normalized.startsWith(".") || normalized.endsWith(".")) return "";
+  if (normalized.includes("..")) return "";
   return normalized;
 };
 
@@ -205,6 +217,21 @@ const resolveAnalyticsSite = (
     return allowlist.has(normalized) ? normalized : null;
   }
 
+  // Prefer mapped Origin host for multi-site clients calling a shared endpoint host.
+  // This lets dave-blake.com events remain isolated even when posting to go.startmyloveengine.com.
+  if (request) {
+    try {
+      const originHeader = request.headers.get("Origin") || "";
+      if (originHeader && VISIT_ALLOWED_ORIGINS.has(originHeader)) {
+        const originHost = normalizeHostname(new URL(originHeader).hostname);
+        const originSite = map[originHost] || "";
+        if (originSite) return originSite;
+      }
+    } catch {
+      // Ignore malformed origin and continue with URL-host lookup.
+    }
+  }
+
   let hostSite = "";
   if (request) {
     try {
@@ -225,6 +252,9 @@ const resolveAnalyticsSite = (
 
   return null;
 };
+
+const isMetadataEnforcedForSite = (site: string) =>
+  site === METADATA_ENFORCED_SITE;
 
 const sqlString = (value: string) => `'${value.replace(/'/g, "''")}'`;
 
@@ -329,9 +359,9 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       ),
       timedQuery(
         "views",
-        `SELECT blob3 AS vendor, blob4 AS page, blob6 AS tier, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+        `SELECT blob3 AS vendor, blob4 AS page, blob5 AS plan_observed, blob6 AS legacy_tier, blob13 AS city, blob14 AS agency_slug, blob15 AS page_type, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
           ANALYTICS_EVENT_TYPES.VIEW
-        )} AND blob3 != '' GROUP BY vendor, page, tier`
+        )} AND blob3 != '' GROUP BY vendor, page, plan_observed, legacy_tier, city, agency_slug, page_type`
       ),
       timedQuery(
         "daily_views",
@@ -369,11 +399,16 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const viewAgg: Record<string, number> = {};
   const uniqueAgg: Record<string, number> = {};
   const pageAgg: Record<string, Record<string, number>> = {};
+  const vendorPlanAgg: Record<string, Record<string, number>> = {};
+  const vendorContext: Record<
+    string,
+    { city: string; agencySlug: string; pageType: string }
+  > = {};
   const refAgg: Record<
     string,
     { internal: Record<string, number>; external: Record<string, number> }
   > = {};
-  const vendorTierSeen: Record<string, Set<string>> = {};
+  const vendorLegacyTierSeen: Record<string, Set<string>> = {};
   const placementAgg: Record<string, Record<string, number>> = {};
   const tierViews = Object.fromEntries(
     Array.from(TIER_ALLOWLIST).map(tier => [tier, 0])
@@ -403,20 +438,41 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     const vendor = String(row.vendor || "").trim();
     if (!vendor) continue;
     const page = String(row.page || "").trim();
-    const tier = String(row.tier || "").trim();
+    const planObserved = String(row.plan_observed || "").trim();
+    const legacyTier = String(row.legacy_tier || "").trim();
+    const city = String(row.city || "").trim();
+    const agencySlug = String(row.agency_slug || "").trim();
+    const pageType = String(row.page_type || "").trim();
     const count = toCount(row.count);
     if (!count) continue;
     viewAgg[vendor] = (viewAgg[vendor] || 0) + count;
+    if (!vendorContext[vendor]) {
+      vendorContext[vendor] = { city: "", agencySlug: "", pageType: "" };
+    }
+    if (city && !vendorContext[vendor].city) {
+      vendorContext[vendor].city = city;
+    }
+    if (agencySlug && !vendorContext[vendor].agencySlug) {
+      vendorContext[vendor].agencySlug = agencySlug;
+    }
+    if (pageType && !vendorContext[vendor].pageType) {
+      vendorContext[vendor].pageType = pageType;
+    }
     if (page) {
       if (!pageAgg[vendor]) pageAgg[vendor] = {};
       pageAgg[vendor][page] = (pageAgg[vendor][page] || 0) + count;
     }
-    if (tier) {
-      if (tierViews[tier] !== undefined) {
-        tierViews[tier] += count;
+    if (planObserved) {
+      if (!vendorPlanAgg[vendor]) vendorPlanAgg[vendor] = {};
+      vendorPlanAgg[vendor][planObserved] =
+        (vendorPlanAgg[vendor][planObserved] || 0) + count;
+    }
+    if (legacyTier) {
+      if (tierViews[legacyTier] !== undefined) {
+        tierViews[legacyTier] += count;
       }
-      if (!vendorTierSeen[vendor]) vendorTierSeen[vendor] = new Set();
-      vendorTierSeen[vendor].add(tier);
+      if (!vendorLegacyTierSeen[vendor]) vendorLegacyTierSeen[vendor] = new Set();
+      vendorLegacyTierSeen[vendor].add(legacyTier);
     }
   }
 
@@ -498,17 +554,29 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       instagram: 0
     };
     const pages = pageAgg[vendor] || {};
+    const context = vendorContext[vendor] || {
+      city: "",
+      agencySlug: "",
+      pageType: ""
+    };
     const refs = refAgg[vendor] || { internal: {}, external: {} };
-    const vendorMeta = getVendorMeta(vendor);
-    const plan = getVendorPlan(vendor);
-    const placementsActive = vendorMeta ? getActivePlacements(vendor) : [];
+    const metadataEnforced = isMetadataEnforcedForSite(site);
+    const vendorMeta = metadataEnforced ? getVendorMeta(vendor) : null;
+    const observedPlans = Object.entries(vendorPlanAgg[vendor] || {})
+      .sort((a, b) => b[1] - a[1])
+      .map(([plan]) => plan);
+    const topObservedPlan = observedPlans[0] || "";
+    const metadataPlan = metadataEnforced ? getVendorPlan(vendor) : "";
+    const plan = metadataEnforced ? metadataPlan : topObservedPlan || "unknown";
+    const placementsActive =
+      metadataEnforced && vendorMeta ? getActivePlacements(vendor) : [];
     const placementsCounts = Object.entries(placementAgg[vendor] || {})
       .sort((a, b) => b[1] - a[1])
       .map(([placement, count]) => ({ placement, count }));
-    let metaStatus = "missing";
-    if (vendorMeta) {
+    let metaStatus = "n/a";
+    if (metadataEnforced && vendorMeta) {
       metaStatus = "ok";
-      const seen = vendorTierSeen[vendor];
+      const seen = vendorLegacyTierSeen[vendor];
       if (seen) {
         for (const tier of seen) {
           if (tier !== plan) {
@@ -522,7 +590,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
           }
         }
       }
-    } else {
+    } else if (metadataEnforced) {
+      metaStatus = "missing";
       console.warn("stats:vendor-missing", { vendor });
     }
 
@@ -542,6 +611,9 @@ const buildStatsResponseFromAnalyticsEngine = async ({
 
     return {
       vendor,
+      city: context.city,
+      agencySlug: context.agencySlug,
+      pageType: context.pageType,
       plan,
       placementsActive,
       placements: placementsCounts,
@@ -1222,6 +1294,9 @@ const getVisitAllowlists = env => {
 };
 
 const validateVisitPayload = (input, allowlists) => {
+  const safeSiteRaw =
+    typeof input?.site === "string" ? input.site.trim() : "";
+  const safeSite = safeSiteRaw ? parseSiteSlug(safeSiteRaw) : "";
   const safeVendor =
     typeof input?.vendor === "string" ? input.vendor.trim() : "";
   const safePage =
@@ -1230,6 +1305,22 @@ const validateVisitPayload = (input, allowlists) => {
     typeof input?.tier === "string" ? input.tier.trim() : "";
   const safePlan =
     typeof input?.plan === "string" ? input.plan.trim() : "";
+  const safeCity =
+    typeof input?.city === "string" ? input.city.trim().toLowerCase() : "";
+  const safeAgencySlugRaw =
+    typeof input?.agency_slug === "string"
+      ? input.agency_slug
+      : typeof input?.agencySlug === "string"
+        ? input.agencySlug
+        : "";
+  const safeAgencySlug = safeAgencySlugRaw.trim().toLowerCase();
+  const safePageTypeRaw =
+    typeof input?.page_type === "string"
+      ? input.page_type
+      : typeof input?.pageType === "string"
+        ? input.pageType
+        : "";
+  const safePageType = safePageTypeRaw.trim().toLowerCase();
   const normalizedTier = normalizePlanValue(safeTier);
   const normalizedPlan = normalizePlanValue(safePlan);
   const placements =
@@ -1244,15 +1335,28 @@ const validateVisitPayload = (input, allowlists) => {
   }
 
   if (
+    (safeSiteRaw && !safeSite) ||
     safeVendor.length > 64 ||
     safePage.length > 64 ||
     (safeTier && safeTier.length > 32) ||
-    (safePlan && safePlan.length > 32)
+    (safePlan && safePlan.length > 32) ||
+    (safeCity && safeCity.length > 64) ||
+    (safeAgencySlug && safeAgencySlug.length > 64) ||
+    (safePageType && safePageType.length > 64)
   ) {
     return { ok: false, error: "Invalid parameters" };
   }
 
   if (!isSafeSlug(safeVendor) || !isSafeSlug(safePage)) {
+    return { ok: false, error: "Invalid parameters" };
+  }
+  if (safeCity && !isSafeSlug(safeCity)) {
+    return { ok: false, error: "Invalid parameters" };
+  }
+  if (safeAgencySlug && !isSafeSlug(safeAgencySlug)) {
+    return { ok: false, error: "Invalid parameters" };
+  }
+  if (safePageType && !isSafeSlug(safePageType)) {
     return { ok: false, error: "Invalid parameters" };
   }
 
@@ -1276,11 +1380,15 @@ const validateVisitPayload = (input, allowlists) => {
 
   return {
     ok: true,
+    site: safeSite,
     vendor: safeVendor,
     page: safePage,
     tier: normalizedTier,
     plan: normalizedPlan,
-    placements: placements.map(normalizePlanValue)
+    placements: placements.map(normalizePlanValue),
+    city: safeCity,
+    agencySlug: safeAgencySlug,
+    pageType: safePageType
   };
 };
 
@@ -1319,15 +1427,19 @@ const resolvePlanAndPlacements = (
 };
 
 export const buildVisitPayload = ({
+  site,
   vendor,
   page,
   tier,
   plan,
-  placements
+  placements,
+  city,
+  agencySlug,
+  pageType
 }) => {
   const allowlists = getVisitAllowlists();
   const validation = validateVisitPayload(
-    { vendor, page, tier, plan, placements },
+    { site, vendor, page, tier, plan, placements, city, agencySlug, pageType },
     allowlists
   );
   if (!validation.ok) {
@@ -1342,11 +1454,15 @@ export const buildVisitPayload = ({
     typeof location !== "undefined" && location.href ? location.href : "";
 
   return {
+    site: validation.site,
     vendor: validation.vendor,
     page: validation.page,
     tier: validation.tier,
     plan: validation.plan,
     placements: validation.placements,
+    city: validation.city,
+    agency_slug: validation.agencySlug,
+    page_type: validation.pageType,
     referrer,
     url
   };
@@ -1553,14 +1669,6 @@ export default {
         });
       }
 
-      const analyticsSite = resolveAnalyticsSite(env, request);
-      if (!analyticsSite) {
-        return new Response("Unknown site", {
-          status: 400,
-          headers: corsHeaders
-        });
-      }
-
       const rateLimitResponse = await enforceRateLimit(
         env,
         request,
@@ -1598,10 +1706,23 @@ export default {
         });
       }
 
-      const { vendor, page } = validation;
-      const vendorMeta = getVendorMeta(vendor);
+      const analyticsSite = resolveAnalyticsSite(
+        env,
+        request,
+        validation.site || undefined
+      );
+      if (!analyticsSite) {
+        return new Response("Unknown site", {
+          status: 400,
+          headers: corsHeaders
+        });
+      }
+
+      const { vendor, page, city, agencySlug, pageType } = validation;
+      const metadataEnforced = isMetadataEnforcedForSite(analyticsSite);
+      const vendorMeta = metadataEnforced ? getVendorMeta(vendor) : null;
       const vendorPlanHint =
-        vendorMeta && getVendorPlan(vendor) !== "unknown"
+        metadataEnforced && vendorMeta && getVendorPlan(vendor) !== "unknown"
           ? getVendorPlan(vendor)
           : "";
       const resolvedPlan = resolvePlanAndPlacements(
@@ -1617,13 +1738,15 @@ export default {
 
       let { plan, placements, legacyTier } = resolvedPlan;
 
-      if (!vendorMeta) {
+      if (metadataEnforced && !vendorMeta) {
         plan = "unknown";
       }
 
       const placementsActive = getActivePlacements(vendor);
       let metaStatus = "ok";
-      if (!vendorMeta) {
+      if (!metadataEnforced) {
+        metaStatus = "n/a";
+      } else if (!vendorMeta) {
         metaStatus = "missing";
         console.warn("visit:vendor-missing", { vendor, plan: plan });
       } else if (legacyTier && vendorPlanHint && legacyTier !== vendorPlanHint) {
@@ -1644,6 +1767,9 @@ export default {
         page,
         plan,
         legacyTier,
+        city,
+        agencySlug,
+        pageType,
         date
       });
 
@@ -1666,6 +1792,9 @@ export default {
           page,
           plan,
           legacyTier,
+          city,
+          agencySlug,
+          pageType,
           date
         });
       }
@@ -1693,6 +1822,9 @@ export default {
           page,
           plan,
           legacyTier,
+          city,
+          agencySlug,
+          pageType,
           date
         });
       }
@@ -1730,6 +1862,9 @@ export default {
                 page,
                 plan,
                 legacyTier,
+                city,
+                agencySlug,
+                pageType,
                 refScope: "int",
                 refBucket: bucket,
                 date
@@ -1746,6 +1881,9 @@ export default {
                 page,
                 plan,
                 legacyTier,
+                city,
+                agencySlug,
+                pageType,
                 refScope: "ext",
                 refBucket: hostname,
                 date
@@ -1953,8 +2091,9 @@ export default {
       const viewAgg = {};
       const uniqueAgg = {};
       const pageAgg = {};
+      const vendorPlanAgg = {};
       const refAgg = {};
-      const vendorTierSeen = {};
+      const vendorLegacyTierSeen = {};
       const placementAgg = {};
       const tierViews = Object.fromEntries(
         Array.from(TIER_ALLOWLIST).map(tier => [tier, 0])
@@ -2013,15 +2152,54 @@ export default {
           if (parts[0] === "tview" && parts.length === 4) {
             const [, vendor, tier, date] = parts;
             if (!(date in dailyViews)) continue;
-            if (!vendorTierSeen[vendor]) vendorTierSeen[vendor] = new Set();
-            vendorTierSeen[vendor].add(tier);
+            if (!vendorLegacyTierSeen[vendor]) vendorLegacyTierSeen[vendor] = new Set();
+            vendorLegacyTierSeen[vendor].add(tier);
             continue;
           }
 
-          if (
-            parts[0] === "planview" ||
-            parts[0] === "tview"
-          ) {
+          if (parts[0] === "planview" && parts.length === 3) {
+            const [, plan, date] = parts;
+            if (!(date in dailyViews)) continue;
+
+            let value;
+            if (statsTimingEnabled) {
+              const getStart = performance.now();
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+              statsGetMs += performance.now() - getStart;
+              statsGetCalls += 1;
+            } else {
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            }
+            if (!value) continue;
+
+            if (tierViews[plan] !== undefined) {
+              tierViews[plan] += value;
+            }
+            continue;
+          }
+
+          if (parts[0] === "planview" && parts.length === 4) {
+            const [, vendor, plan, date] = parts;
+            if (!(date in dailyViews)) continue;
+
+            let value;
+            if (statsTimingEnabled) {
+              const getStart = performance.now();
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+              statsGetMs += performance.now() - getStart;
+              statsGetCalls += 1;
+            } else {
+              value = parseInt(await env.CLICKS.get(key.name)) || 0;
+            }
+            if (!value) continue;
+
+            if (!vendorPlanAgg[vendor]) vendorPlanAgg[vendor] = {};
+            vendorPlanAgg[vendor][plan] =
+              (vendorPlanAgg[vendor][plan] || 0) + value;
+            continue;
+          }
+
+          if (parts[0] === "tview") {
             continue;
           }
 
@@ -2198,16 +2376,23 @@ export default {
         };
         const pages = pageAgg[vendor] || {};
         const refs = refAgg[vendor] || { internal: {}, external: {} };
-        const vendorMeta = getVendorMeta(vendor);
-        const plan = getVendorPlan(vendor);
-        const placementsActive = vendorMeta ? getActivePlacements(vendor) : [];
+        const metadataEnforced = isMetadataEnforcedForSite(site);
+        const vendorMeta = metadataEnforced ? getVendorMeta(vendor) : null;
+        const observedPlans = Object.entries(vendorPlanAgg[vendor] || {})
+          .sort((a, b) => b[1] - a[1])
+          .map(([plan]) => plan);
+        const topObservedPlan = observedPlans[0] || "";
+        const metadataPlan = metadataEnforced ? getVendorPlan(vendor) : "";
+        const plan = metadataEnforced ? metadataPlan : topObservedPlan || "unknown";
+        const placementsActive =
+          metadataEnforced && vendorMeta ? getActivePlacements(vendor) : [];
         const placementsCounts = Object.entries(placementAgg[vendor] || {})
           .sort((a, b) => b[1] - a[1])
           .map(([placement, count]) => ({ placement, count }));
-        let metaStatus = "missing";
-        if (vendorMeta) {
+        let metaStatus = "n/a";
+        if (metadataEnforced && vendorMeta) {
           metaStatus = "ok";
-          const seen = vendorTierSeen[vendor];
+          const seen = vendorLegacyTierSeen[vendor];
           if (seen) {
             for (const tier of seen) {
               if (tier !== plan) {
@@ -2221,7 +2406,8 @@ export default {
               }
             }
           }
-        } else {
+        } else if (metadataEnforced) {
+          metaStatus = "missing";
           console.warn("stats:vendor-missing", { vendor });
         }
 
@@ -2241,6 +2427,9 @@ export default {
 
         return {
           vendor,
+          city: "",
+          agencySlug: "",
+          pageType: "",
           plan,
           placementsActive,
           placements: placementsCounts,
