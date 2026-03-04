@@ -133,6 +133,12 @@ test("records city, agency_slug, and page_type in analytics blobs", async () => 
   expect(viewEvent.blobs[16]).toBe("production");
   expect(viewEvent.blobs[17]).toBe("desktop");
   expect(viewEvent.blobs[18]).toBe("internal");
+  const viewContext = JSON.parse(viewEvent.blobs[19]);
+  expect(viewContext.sourcePath).toBe("/models/agency-rates/");
+  expect(viewContext.sourceQuery).toBe("agency=VIVBNE26");
+  expect(viewContext.sourceEnv).toBe("production");
+  expect(viewContext.referrerDomain).toBe("dave-blake.com");
+  expect(viewContext.platform).toBe("unknown");
 });
 
 test("records localhost source context and mobile device class", async () => {
@@ -179,6 +185,73 @@ test("records localhost source context and mobile device class", async () => {
   expect(viewEvent.blobs[16]).toBe("localhost");
   expect(viewEvent.blobs[17]).toBe("mobile");
   expect(viewEvent.blobs[18]).toBe("direct");
+  const viewContext = JSON.parse(viewEvent.blobs[19]);
+  expect(viewContext.sourcePath).toBe("/models/agency-rates/");
+  expect(viewContext.sourceQuery).toBe("agency=VIVBNE26&utm_medium=email");
+  expect(viewContext.sourceEnv).toBe("localhost");
+  expect(viewContext.platform).toBe("ios");
+});
+
+test("payload referrer empty does not fall back to request Referer header", async () => {
+  const analyticsWrites: any[] = [];
+  const payload = {
+    site: "dave-blake.com",
+    vendor: "vivbne26",
+    page: "agency-rates",
+    tier: "featured",
+    plan: "featured",
+    city: "brisbane",
+    agency_slug: "viviens-brisbane",
+    page_type: "agency-rates",
+    url: "https://staging.dave-blake.com/models/agency-rates/?agency=VIVBNE26",
+    referrer: "",
+    custom_context: {
+      agency_code: "VIVBNE26",
+      campaign: "email-march",
+      rank: 1
+    }
+  };
+
+  const request = new Request("https://example.com/visit", {
+    method: "POST",
+    headers: {
+      Origin: "https://staging.dave-blake.com",
+      Referer: "https://staging.dave-blake.com/",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.20",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const env = {
+    CLICKS,
+    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com",
+    ANALYTICS_ENGINE: {
+      writeDataPoint(point) {
+        analyticsWrites.push(point);
+      }
+    }
+  } as any;
+
+  const response = await worker.fetch(request, env);
+  expect(response.status).toBe(204);
+
+  const viewEvent = analyticsWrites.find(point => point?.blobs?.[0] === "view");
+  expect(viewEvent).toBeTruthy();
+  expect(viewEvent.blobs[18]).toBe("direct");
+  const viewContext = JSON.parse(viewEvent.blobs[19]);
+  expect(viewContext.sourceEnv).toBe("staging");
+  expect(viewContext.platform).toBe("macos");
+  expect(viewContext.referrerDomain).toBe("");
+  expect(viewContext.custom.agency_code).toBe("VIVBNE26");
+  expect(viewContext.custom.campaign).toBe("email-march");
+  expect(viewContext.custom.rank).toBe("1");
+
+  const refEvent = analyticsWrites.find(
+    point => point?.blobs?.[0] === "referrer"
+  );
+  expect(refEvent).toBeUndefined();
 });
 
 test("falls back to single Analytics Engine index when dual-index write fails", async () => {

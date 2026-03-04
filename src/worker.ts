@@ -59,6 +59,7 @@ type AnalyticsEventFields = {
   sourceEnv?: string;
   deviceClass?: string;
   refChannel?: string;
+  eventContext?: string;
   clickType?: string;
   placement?: string;
   refScope?: "int" | "ext";
@@ -86,10 +87,11 @@ const ANALYTICS_BLOBS = {
   SOURCE_HOST: 15,
   SOURCE_ENV: 16,
   DEVICE_CLASS: 17,
-  REF_CHANNEL: 18
+  REF_CHANNEL: 18,
+  EVENT_CONTEXT: 19
 } as const;
 
-const ANALYTICS_BLOB_COUNT = 19;
+const ANALYTICS_BLOB_COUNT = 20;
 let analyticsIndexMode: "dual" | "single" = "dual";
 let analyticsIndexFallbackLogged = false;
 
@@ -114,6 +116,7 @@ const buildAnalyticsBlobs = (fields: AnalyticsEventFields) => {
   blobs[ANALYTICS_BLOBS.SOURCE_ENV] = fields.sourceEnv || "";
   blobs[ANALYTICS_BLOBS.DEVICE_CLASS] = fields.deviceClass || "";
   blobs[ANALYTICS_BLOBS.REF_CHANNEL] = fields.refChannel || "";
+  blobs[ANALYTICS_BLOBS.EVENT_CONTEXT] = fields.eventContext || "";
   return blobs;
 };
 
@@ -1161,6 +1164,75 @@ const classifyDeviceClass = (userAgent: string) => {
   return "desktop";
 };
 
+const classifyUserPlatform = (userAgent: string) => {
+  const ua = (userAgent || "").toLowerCase();
+  if (!ua) return "unknown";
+  if (/(iphone|ipad|ipod|ios)/i.test(ua)) return "ios";
+  if (/android/i.test(ua)) return "android";
+  if (/windows/i.test(ua)) return "windows";
+  if (/(mac os|macintosh|darwin)/i.test(ua)) return "macos";
+  if (/linux/i.test(ua)) return "linux";
+  return "unknown";
+};
+
+const MAX_EVENT_CONTEXT_LENGTH = 1500;
+const MAX_CUSTOM_CONTEXT_KEYS = 20;
+
+const sanitizeCustomContext = (value: unknown) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => /^[a-zA-Z0-9_.-]{1,40}$/.test(key))
+    .slice(0, MAX_CUSTOM_CONTEXT_KEYS)
+    .map(([key, item]) => {
+      if (
+        typeof item === "string" ||
+        typeof item === "number" ||
+        typeof item === "boolean"
+      ) {
+        return [key, String(item)];
+      }
+      return [key, JSON.stringify(item)];
+    });
+
+  return Object.fromEntries(entries);
+};
+
+const buildEventContext = ({
+  sourcePath,
+  sourceQuery,
+  sourceEnv,
+  platform,
+  referrerDomain,
+  customContext
+}: {
+  sourcePath: string;
+  sourceQuery: string;
+  sourceEnv: string;
+  platform: string;
+  referrerDomain: string;
+  customContext: Record<string, string>;
+}) => {
+  const context = {
+    sourcePath: sourcePath || "",
+    sourceQuery: sourceQuery || "",
+    sourceEnv: sourceEnv || "",
+    platform: platform || "unknown",
+    referrerDomain: referrerDomain || "",
+    custom: customContext
+  };
+
+  const serialized = JSON.stringify(context);
+  if (serialized.length <= MAX_EVENT_CONTEXT_LENGTH) return serialized;
+  return JSON.stringify({
+    ...context,
+    custom: {},
+    truncated: true
+  });
+};
+
 const classifyRefChannel = ({
   explicitRefChannel,
   hasReferrer,
@@ -1889,26 +1961,41 @@ export default {
       const sourceUrl = getSafeUrl(payload.url);
       const sourceHost = getSourceHostFromUrl(sourceUrl);
       const sourceEnv = classifySourceEnvironment(sourceHost);
+      const sourcePath = sourceUrl?.pathname || "";
+      const sourceQuery = sourceUrl?.search ? sourceUrl.search.slice(1) : "";
       const ip =
         request.headers.get("cf-connecting-ip") ||
         request.headers.get("x-forwarded-for") ||
         "";
       const userAgent = request.headers.get("user-agent") || "";
       const deviceClass = classifyDeviceClass(userAgent);
+      const platform = classifyUserPlatform(userAgent);
 
+      const hasPayloadReferrer =
+        payload &&
+        Object.prototype.hasOwnProperty.call(payload, "referrer");
       const referrerValue =
-        typeof payload.referrer === "string" ? payload.referrer : "";
+        hasPayloadReferrer && typeof payload.referrer === "string"
+          ? payload.referrer
+          : "";
       const headerReferrer = request.headers.get("referer") || "";
-      const referrer = referrerValue || headerReferrer;
+      const referrer = hasPayloadReferrer ? referrerValue : headerReferrer;
       let refScope: "int" | "ext" | "" = "";
       let refBucket = "";
       let refChannel = "direct";
+      let referrerDomain = "";
       const explicitRefChannel =
         typeof payload.ref_channel === "string"
           ? payload.ref_channel.trim().toLowerCase()
           : typeof payload.refChannel === "string"
             ? payload.refChannel.trim().toLowerCase()
             : "";
+      const customContext = sanitizeCustomContext(
+        payload.custom_context ??
+          payload.customContext ??
+          payload.context ??
+          payload.custom
+      );
       const legacyTierForAnalytics =
         validation.tier && validation.tier !== plan ? validation.tier : "";
 
@@ -1923,6 +2010,7 @@ export default {
         if (refUrl) {
           const hostname = normalizeHostname(refUrl.hostname);
           if (hostname && isSafeHostname(hostname)) {
+            referrerDomain = hostname;
             const isInternal = Array.from(INTERNAL_REFERRER_DOMAINS).some(
               domain => hostname === domain || hostname.endsWith(`.${domain}`)
             );
@@ -1942,6 +2030,14 @@ export default {
         hasReferrer: Boolean(refScope),
         isInternalReferrer: refScope === "int"
       });
+      const eventContext = buildEventContext({
+        sourcePath,
+        sourceQuery,
+        sourceEnv,
+        platform,
+        referrerDomain,
+        customContext
+      });
 
       writeAnalyticsEvent(env, {
         eventType: ANALYTICS_EVENT_TYPES.VIEW,
@@ -1957,6 +2053,7 @@ export default {
         sourceEnv,
         deviceClass,
         refChannel,
+        eventContext,
         date
       });
 
@@ -1981,6 +2078,7 @@ export default {
           sourceEnv,
           deviceClass,
           refChannel,
+          eventContext,
           date
         });
       }
@@ -2015,6 +2113,7 @@ export default {
           sourceEnv,
           deviceClass,
           refChannel,
+          eventContext,
           date
         });
       }
@@ -2035,6 +2134,7 @@ export default {
           sourceEnv,
           deviceClass,
           refChannel,
+          eventContext,
           refScope,
           refBucket,
           date
