@@ -1,27 +1,15 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from "vitest";
-import { Miniflare } from "miniflare";
+import { afterEach, expect, test, vi } from "vitest";
 import worker from "../src/worker";
 
-let mf: Miniflare;
-let CLICKS: any;
+const baseEnv = {
+  ANALYTICS_API_TOKEN: "test-secret",
+  ANALYTICS_ENGINE_ACCOUNT_ID: "acct",
+  ANALYTICS_ENGINE_API_TOKEN: "token",
+  ANALYTICS_ENGINE_DATASET: "analytics_events"
+} as const;
 
-beforeAll(async () => {
-  mf = new Miniflare({
-    modules: true,
-    script: "export default { fetch() { return new Response('ok'); } }",
-    kvNamespaces: ["CLICKS"]
-  });
-
-  CLICKS = await mf.getKVNamespace("CLICKS");
-});
-
-beforeEach(async () => {
-  const list = await CLICKS.list();
-  await Promise.all(list.keys.map(key => CLICKS.delete(key.name)));
-});
-
-afterAll(async () => {
-  await mf.dispose();
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 test("visit resolves site from host mapping", async () => {
@@ -39,13 +27,17 @@ test("visit resolves site from host mapping", async () => {
     })
   });
 
+  const writes: any[] = [];
   const env = {
-    CLICKS,
-    SITE_MAP_JSON: "{\"smle.mocha.app\":\"startmyloveengine\"}"
+    SITE_MAP_JSON: "{\"smle.mocha.app\":\"startmyloveengine\"}",
+    ANALYTICS_ENGINE: {
+      writeDataPoint: (point: any) => writes.push(point)
+    }
   } as any;
 
   const response = await worker.fetch(request, env);
   expect(response.status).toBe(204);
+  expect(writes.some(point => point?.blobs?.[1] === "startmyloveengine")).toBe(true);
 });
 
 test("visit rejects unknown site when multiple sites configured", async () => {
@@ -64,8 +56,8 @@ test("visit rejects unknown site when multiple sites configured", async () => {
   });
 
   const env = {
-    CLICKS,
-    SITE_ALLOWLIST: "startmyloveengine,othersite"
+    SITE_ALLOWLIST: "startmyloveengine,othersite",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
   } as any;
 
   const response = await worker.fetch(request, env);
@@ -90,7 +82,6 @@ test("visit resolves site from allowed origin mapping on shared host", async () 
   });
 
   const env = {
-    CLICKS,
     ANALYTICS_ENGINE: {
       writeDataPoint: (point: any) => points.push(point)
     },
@@ -115,8 +106,7 @@ test("stats rejects site not in allowlist", async () => {
   );
 
   const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret",
+    ...baseEnv,
     SITE_ALLOWLIST: "startmyloveengine,othersite"
   } as any;
 
@@ -132,50 +122,68 @@ test("stats accepts dotted site slug when allowlisted", async () => {
     }
   );
 
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+    ok: true,
+    json: async () => ({ data: [] })
+  } as any);
+
   const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret",
+    ...baseEnv,
     SITE_ALLOWLIST: "startmyloveengine,dave-blake.com"
   } as any;
 
   const response = await worker.fetch(request, env);
+  fetchSpy.mockRestore();
+
   expect(response.status).toBe(200);
+  expect(response.headers.get("X-Data-Source")).toBe("ae");
 });
 
 test("stats for non-metadata site derives plan from observed events", async () => {
-  const visit = new Request("https://example.com/visit", {
-    method: "POST",
-    headers: {
-      Origin: "https://dave-blake.com",
-      "Content-Type": "application/json",
-      "cf-connecting-ip": "203.0.113.22",
-      "user-agent": "test-agent"
-    },
-    body: JSON.stringify({
-      site: "dave-blake.com",
-      vendor: "vivbne26",
-      page: "agency-rates",
-      tier: "featured",
-      plan: "featured"
-    })
-  });
-
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret",
-    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com"
-  } as any;
-
-  const visitResponse = await worker.fetch(visit, env);
-  expect(visitResponse.status).toBe(204);
-
   const statsRequest = new Request(
     "https://example.com/api/stats?site=dave-blake.com&range=7d",
     {
       headers: { Authorization: "Bearer test-secret" }
     }
   );
+
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (_url, init) => {
+      const sql = String(init?.body || "");
+      if (sql.includes("blob1 = 'view'") && sql.includes("GROUP BY vendor, page")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                vendor: "vivbne26",
+                page: "agency-rates",
+                plan_observed: "featured",
+                legacy_tier: "",
+                city: "brisbane",
+                agency_slug: "viviens-brisbane",
+                page_type: "agency-rates",
+                count: 2
+              }
+            ]
+          })
+        } as any;
+      }
+      return {
+        ok: true,
+        json: async () => ({ data: [] })
+      } as any;
+    }
+  );
+
+  const env = {
+    ...baseEnv,
+    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com"
+  } as any;
+
   const statsResponse = await worker.fetch(statsRequest, env);
+  fetchSpy.mockRestore();
+
   expect(statsResponse.status).toBe(200);
   const json = await statsResponse.json();
   const vendor = json.vendors.find((row: any) => row.vendor === "vivbne26");

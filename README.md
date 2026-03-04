@@ -13,17 +13,15 @@ Fast, local, deterministic tests for a Cloudflare Workers click tracker using Vi
 
 ## Notes
 
-- Update `wrangler.toml` with your real KV namespace IDs.
 - Set `ANALYTICS_API_TOKEN` as a Wrangler secret for `/api/stats` auth.
-- Optional env vars: `CLICK_SIGNING_SECRET`, `RATE_LIMIT_PER_MINUTE`, `ANALYTICS_CACHE`, `VENDOR_ALLOWLIST`, `VISIT_PAGE_ALLOWLIST`, `CRON_DRY_RUN`, `CRON_MAX_KEYS`.
+- Optional env vars: `CLICK_SIGNING_SECRET`, `RATE_LIMIT_PER_MINUTE`, `ANALYTICS_CACHE`, `VENDOR_ALLOWLIST`, `VISIT_PAGE_ALLOWLIST`.
 - Multi-site routing: set `SITE_MAP_JSON` (hostname -> site slug) and `SITE_ALLOWLIST` (CSV) to attribute events per brand/site when using a shared Worker endpoint.
 - Abuse protection: rate limiting is enabled by default at **60 requests/minute per IP**. Set `RATE_LIMIT_PER_MINUTE=0` to disable.
 - Click signing: `POST /click` is signed **server-side only**; the worker computes an internal signature after validating origin/referrer. If the secret is missing, `POST /click` returns 503. **GET /click is deprecated and disabled (410).**
 - POST /click hardening: requires an allowed `Origin` and `Referer` (from `contracts/analytics.contract.json` allowlist).
 - Cache scoping: when `ANALYTICS_CACHE=1`, cache keys include a hash of the Authorization token.
-- Cron rollup keeps daily keys for the current month and the previous two months, then rolls older days into monthly keys (`rollup:vendor:type:YYYY-MM`).
-- Tests can force cron time via `CRON_NOW` (ISO timestamp) passed to `scheduled()` for deterministic rollup behavior.
-- Optional R2 snapshots write monthly CSVs to `CLICKS_SNAPSHOTS` under `smle/snapshots/YYYY-MM/` plus raw key snapshots under `smle/snapshots-raw/YYYY-MM/`.
+- AE-only mode: this worker writes and reads analytics from Cloudflare Analytics Engine only; KV/R2 rollup paths are removed.
+- Temporary local dashboard CORS is enabled for `http://127.0.0.1:5500` and `http://localhost:5500` for rapid testing. Remove both origins before final production cutover.
 
 ## API contract
 

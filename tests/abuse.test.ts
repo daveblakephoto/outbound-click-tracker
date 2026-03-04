@@ -1,38 +1,20 @@
-import { afterAll, beforeAll, beforeEach, expect, test, vi } from "vitest";
-import { Miniflare } from "miniflare";
+import { afterAll, beforeAll, expect, test, vi } from "vitest";
 import worker from "../src/worker";
 
-let mf: Miniflare;
-let CLICKS: any;
-
-beforeAll(async () => {
+beforeAll(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-02-02T10:00:00.000Z"));
-
-  mf = new Miniflare({
-    modules: true,
-    script: "export default { fetch() { return new Response('ok'); } }",
-    kvNamespaces: ["CLICKS"]
-  });
-
-  CLICKS = await mf.getKVNamespace("CLICKS");
 });
 
-beforeEach(async () => {
-  const list = await CLICKS.list();
-  await Promise.all(list.keys.map(key => CLICKS.delete(key.name)));
-});
-
-afterAll(async () => {
+afterAll(() => {
   vi.useRealTimers();
-  await mf.dispose();
 });
 
 test("rate limits /visit after threshold", async () => {
   const env = {
-    CLICKS,
     RATE_LIMIT_PER_MINUTE: 1,
-    ANALYTICS_SITE: "startmyloveengine"
+    ANALYTICS_SITE: "startmyloveengine",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
   } as any;
 
   const body = JSON.stringify({
@@ -63,9 +45,9 @@ test("rate limits /visit after threshold", async () => {
 test("POST click is accepted with server-side signing enabled", async () => {
   const secret = "super-secret";
   const env = {
-    CLICKS,
     CLICK_SIGNING_SECRET: secret,
-    ANALYTICS_SITE: "startmyloveengine"
+    ANALYTICS_SITE: "startmyloveengine",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
   } as any;
 
   const vendor = "dave-blake";
@@ -90,9 +72,9 @@ test("POST click is accepted with server-side signing enabled", async () => {
 
 test("POST click rejects missing referrer", async () => {
   const env = {
-    CLICKS,
     CLICK_SIGNING_SECRET: "super-secret",
-    ANALYTICS_SITE: "startmyloveengine"
+    ANALYTICS_SITE: "startmyloveengine",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
   } as any;
 
   const request = new Request("https://example.com/click", {

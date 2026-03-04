@@ -45,6 +45,12 @@ type AnalyticsEngineDataset = {
   }) => void;
 };
 
+const hasAnalyticsWriter = (env: any) =>
+  Boolean(
+    env?.ANALYTICS_ENGINE &&
+      typeof env.ANALYTICS_ENGINE.writeDataPoint === "function"
+  );
+
 type AnalyticsEventFields = {
   eventType: AnalyticsEventType;
   site: string;
@@ -1276,9 +1282,56 @@ const hmacSha256Hex = async (secret: string, payload: string) => {
     .join("");
 };
 
-const incrementCounter = async (env, key, options) => {
-  const current = parseInt((await env.CLICKS.get(key)) || "0", 10);
-  await env.CLICKS.put(key, String(current + 1), options);
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const UNIQUE_VIEW_WINDOW_MS = 30 * 60_000;
+const IN_MEMORY_COUNTER_MAX = 20_000;
+const inMemoryRateLimitCounts = new Map<string, number>();
+const inMemoryRateLimitExpirations = new Map<string, number>();
+const inMemoryUniqueViewLocks = new Map<string, number>();
+
+const pruneExpiredInMemory = (store: Map<string, number>, nowMs: number) => {
+  if (store.size < IN_MEMORY_COUNTER_MAX) return;
+  for (const [key, expiresAt] of store.entries()) {
+    if (expiresAt <= nowMs) {
+      store.delete(key);
+    }
+    if (store.size < IN_MEMORY_COUNTER_MAX) {
+      break;
+    }
+  }
+};
+
+const acquireUniqueViewLock = (key: string, nowMs = Date.now()) => {
+  const expiresAt = inMemoryUniqueViewLocks.get(key) || 0;
+  if (expiresAt > nowMs) return false;
+  inMemoryUniqueViewLocks.set(key, nowMs + UNIQUE_VIEW_WINDOW_MS);
+  pruneExpiredInMemory(inMemoryUniqueViewLocks, nowMs);
+  return true;
+};
+
+const canProceedUnderRateLimit = (
+  key: string,
+  limit: number,
+  nowMs = Date.now()
+) => {
+  const expiresAt = inMemoryRateLimitExpirations.get(key) || 0;
+  if (expiresAt <= nowMs) {
+    inMemoryRateLimitExpirations.set(key, nowMs + RATE_LIMIT_WINDOW_MS);
+    inMemoryRateLimitCounts.set(key, 1);
+    pruneExpiredInMemory(inMemoryRateLimitExpirations, nowMs);
+    if (inMemoryRateLimitCounts.size > IN_MEMORY_COUNTER_MAX) {
+      for (const staleKey of inMemoryRateLimitCounts.keys()) {
+        if (!inMemoryRateLimitExpirations.has(staleKey)) {
+          inMemoryRateLimitCounts.delete(staleKey);
+        }
+      }
+    }
+    return true;
+  }
+  const currentCount = inMemoryRateLimitCounts.get(key) || 0;
+  if (currentCount >= limit) return false;
+  inMemoryRateLimitCounts.set(key, currentCount + 1);
+  return true;
 };
 
 const normalizeBearerToken = (value: string | null) => {
@@ -1317,8 +1370,7 @@ const enforceRateLimit = async (
 
   const minute = new Date().toISOString().slice(0, 16);
   const rateKey = `rl:${prefix}:${ip}:${minute}`;
-  const current = parseInt((await env.CLICKS.get(rateKey)) || "0", 10);
-  if (current >= limit) {
+  if (!canProceedUnderRateLimit(rateKey, limit)) {
     console.warn("abuse:rate-limit", {
       path: prefix,
       ip,
@@ -1330,9 +1382,6 @@ const enforceRateLimit = async (
       headers
     });
   }
-  await env.CLICKS.put(rateKey, String(current + 1), {
-    expirationTtl: 60
-  });
   return null;
 };
 
@@ -1400,11 +1449,12 @@ const getExportCorsHeaders = request => {
   };
 };
 
-const parseBoolFlag = value => {
-  if (value === true) return true;
-  if (value === false || value == null) return false;
-  const normalized = String(value).trim().toLowerCase();
-  return normalized === "1" || normalized === "true" || normalized === "yes";
+const applyCorsHeaders = (response: Response, corsHeaders: Record<string, string>) => {
+  const withCors = new Response(response.body, response);
+  for (const [key, value] of Object.entries(corsHeaders)) {
+    withCors.headers.set(key, value);
+  }
+  return withCors;
 };
 
 const normalizePlanValue = value => {
@@ -1765,6 +1815,12 @@ export default {
             headers: clickCorsHeaders
           });
         }
+        if (!hasAnalyticsWriter(env)) {
+          return new Response("Analytics engine unavailable", {
+            status: 503,
+            headers: clickCorsHeaders
+          });
+        }
 
         const rateLimitResponse = await enforceRateLimit(
           env,
@@ -1799,9 +1855,6 @@ export default {
         );
 
         const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-        const key = `${vendor}:${type}:${date}`;
-        const current = parseInt((await env.CLICKS.get(key)) || "0", 10);
-        await env.CLICKS.put(key, String(current + 1));
         writeAnalyticsEvent(env, {
           eventType: ANALYTICS_EVENT_TYPES.CLICK,
           site: analyticsSite,
@@ -1866,7 +1919,12 @@ export default {
       if (rateLimitResponse) return rateLimitResponse;
 
       const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-      await incrementCounter(env, `raw:${date}`);
+      if (!hasAnalyticsWriter(env)) {
+        return new Response("Analytics engine unavailable", {
+          status: 503,
+          headers: corsHeaders
+        });
+      }
 
       let payload;
       try {
@@ -2048,11 +2106,7 @@ export default {
 
       const fingerprint = await sha1Hex(`${ip}|${userAgent}|${vendor}`);
       const lockKey = `uviewlock:${vendor}:${fingerprint}`;
-
-      const seen = await env.CLICKS.get(lockKey);
-      if (!seen) {
-        await env.CLICKS.put(lockKey, "1", { expirationTtl: 1800 });
-        await incrementCounter(env, `uview:${vendor}:${date}`);
+      if (acquireUniqueViewLock(lockKey)) {
         writeAnalyticsEvent(env, {
           eventType: ANALYTICS_EVENT_TYPES.UNIQUE_VIEW,
           site: analyticsSite,
@@ -2071,23 +2125,12 @@ export default {
         });
       }
 
-      await incrementCounter(env, `view:${vendor}:${date}`);
-      await incrementCounter(env, `pview:${vendor}:${page}:${date}`);
-      if (legacyTier) {
-        await incrementCounter(env, `tview:${legacyTier}:${date}`);
-        await incrementCounter(env, `tview:${vendor}:${legacyTier}:${date}`);
-      }
-      await incrementCounter(env, `planview:${plan}:${date}`);
-      await incrementCounter(env, `planview:${vendor}:${plan}:${date}`);
-
       const placementUnion = new Set([
         ...placements,
         ...placementsActive
       ]);
 
       for (const placement of placementUnion) {
-        await incrementCounter(env, `plcview:${placement}:${date}`);
-        await incrementCounter(env, `plcview:${vendor}:${placement}:${date}`);
         writeAnalyticsEvent(env, {
           eventType: ANALYTICS_EVENT_TYPES.PLACEMENT_VIEW,
           site: analyticsSite,
@@ -2108,7 +2151,6 @@ export default {
       }
 
       if (refScope && refBucket) {
-        await incrementCounter(env, `ref:${vendor}:${refScope}:${refBucket}:${date}`);
         writeAnalyticsEvent(env, {
           eventType: ANALYTICS_EVENT_TYPES.REFERRER,
           site: analyticsSite,
@@ -2202,39 +2244,47 @@ export default {
        STATS API (AUTHENTICATED)
        ---------------------------- */
     if (url.pathname === "/api/stats") {
+      const corsHeaders = getExportCorsHeaders(request);
+
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
       const statsTimingEnabled = env.DEBUG_STATS === "1";
-      const statsStart = statsTimingEnabled ? performance.now() : 0;
       const statsRay = statsTimingEnabled
         ? request.headers.get("cf-ray")
         : null;
-      let statsListMs = 0;
-      let statsGetMs = 0;
-      let statsSerializeMs = 0;
-      let statsListCalls = 0;
-      let statsGetCalls = 0;
-      let statsKeysSeen = 0;
 
       if (request.method !== "GET") {
         return new Response("Method not allowed", {
           status: 405,
-          headers: { Allow: "GET" }
+          headers: { Allow: "GET, OPTIONS", ...corsHeaders }
         });
       }
 
       const auth = request.headers.get("Authorization");
       if (auth !== `Bearer ${env.ANALYTICS_API_TOKEN}`) {
-        return new Response("Unauthorized", { status: 401 });
+        return new Response("Unauthorized", {
+          status: 401,
+          headers: corsHeaders
+        });
       }
 
       const siteParam = url.searchParams.get("site");
       const range = url.searchParams.get("range") || "28d";
 
       if (!siteParam) {
-        return new Response("Missing site", { status: 400 });
+        return new Response("Missing site", {
+          status: 400,
+          headers: corsHeaders
+        });
       }
       const site = parseSiteSlug(siteParam);
       if (!site) {
-        return new Response("Invalid site", { status: 400 });
+        return new Response("Invalid site", {
+          status: 400,
+          headers: corsHeaders
+        });
       }
 
       const rangeDays = getRangeDays(range);
@@ -2246,11 +2296,15 @@ export default {
           maxDays: MAX_RANGE_DAYS
         });
         return new Response(`Max range is ${MAX_RANGE_DAYS} days`, {
-          status: 400
+          status: 400,
+          headers: corsHeaders
         });
       }
       if (!rangeDays) {
-        return new Response("Invalid range", { status: 400 });
+        return new Response("Invalid range", {
+          status: 400,
+          headers: corsHeaders
+        });
       }
 
       // Build inclusive date window
@@ -2262,7 +2316,10 @@ export default {
         dates.push(d.toISOString().slice(0, 10));
       }
       if (!isSiteAllowed(env, site)) {
-        return new Response("Unknown site", { status: 404 });
+        return new Response("Unknown site", {
+          status: 404,
+          headers: corsHeaders
+        });
       }
 
       const cacheEnabled = isAnalyticsCacheEnabled(env);
@@ -2281,491 +2338,69 @@ export default {
         if (cached) {
           const cachedResponse = new Response(cached.body, cached);
           cachedResponse.headers.set(CACHE_STATUS_HEADER, "HIT");
-          return cachedResponse;
+          return applyCorsHeaders(cachedResponse, corsHeaders);
         }
       }
 
-      let dataWarning: string | undefined;
-      let response: Response | null = null;
-      if (analyticsEngineConfigured(env)) {
-        try {
-          console.log("stats:ae", { cached: false, range, site });
-          response = await buildStatsResponseFromAnalyticsEngine({
-            env,
-            site,
-            range,
-            dates,
-            statsTimingEnabled,
-            statsRay,
-            cacheControl,
-            dataSource: "ae"
-          });
-        } catch (error) {
-          dataWarning = "ae_failed";
-          console.error("stats:analytics-engine-failed", error);
-        }
+      if (!analyticsEngineConfigured(env)) {
+        return new Response(
+          JSON.stringify({
+            error: "Analytics Engine is not configured for /api/stats",
+            dataSource: "ae",
+            dataWarning: "ae_unconfigured"
+          }),
+          {
+            status: 503,
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "no-store",
+              [DATA_SOURCE_HEADER]: "ae",
+              [DATA_WARNING_HEADER]: "ae_unconfigured",
+              ...corsHeaders
+            }
+          }
+        );
       }
 
-      if (response) {
+      try {
+        console.log("stats:ae", { cached: false, range, site });
+        const response = await buildStatsResponseFromAnalyticsEngine({
+          env,
+          site,
+          range,
+          dates,
+          statsTimingEnabled,
+          statsRay,
+          cacheControl,
+          dataSource: "ae"
+        });
         if (cacheEnabled) {
           response.headers.set(CACHE_STATUS_HEADER, "MISS");
-          if (cacheKey && response.status === 200 && !dataWarning) {
+          if (cacheKey && response.status === 200) {
             await caches.default.put(cacheKey, response.clone());
           }
         }
-        return response;
+        return applyCorsHeaders(response, corsHeaders);
+      } catch (error) {
+        console.error("stats:analytics-engine-failed", error);
+        return new Response(
+          JSON.stringify({
+            error: "Analytics Engine query failed for /api/stats",
+            dataSource: "ae",
+            dataWarning: "ae_failed"
+          }),
+          {
+            status: 503,
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "no-store",
+              [DATA_SOURCE_HEADER]: "ae",
+              [DATA_WARNING_HEADER]: "ae_failed",
+              ...corsHeaders
+            }
+          }
+        );
       }
-
-      console.log("stats:kv", {
-        cached: false,
-        range,
-        site,
-        fallback: dataWarning ? "ae_failed" : undefined
-      });
-
-      const vendorAgg = {};
-      const viewAgg = {};
-      const uniqueAgg = {};
-      const pageAgg = {};
-      const vendorPlanAgg = {};
-      const refAgg = {};
-      const vendorLegacyTierSeen = {};
-      const placementAgg = {};
-      const tierViews = Object.fromEntries(
-        Array.from(TIER_ALLOWLIST).map(tier => [tier, 0])
-      );
-
-      const dailyTotals = Object.fromEntries(
-        dates.map(d => [d, 0])
-      );
-      const dailyViews = Object.fromEntries(
-        dates.map(d => [d, 0])
-      );
-      const dailyUniqueViews = Object.fromEntries(
-        dates.map(d => [d, 0])
-      );
-
-      let cursor;
-      do {
-        let list;
-        if (statsTimingEnabled) {
-          const listStart = performance.now();
-          list = await env.CLICKS.list({ cursor });
-          statsListMs += performance.now() - listStart;
-          statsListCalls += 1;
-        } else {
-          list = await env.CLICKS.list({ cursor });
-        }
-
-        for (const key of list.keys) {
-          statsKeysSeen += 1;
-          const parts = key.name.split(":");
-          if (parts[0] === "rollup") continue;
-          if (parts[0] === "rl" || parts[0] === "uviewlock") continue;
-          if (parts[0] === "raw") continue;
-
-          if (parts[0] === "tview" && parts.length === 3) {
-            const [, tier, date] = parts;
-            if (!(date in dailyViews)) continue;
-
-            let value;
-            if (statsTimingEnabled) {
-              const getStart = performance.now();
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-              statsGetMs += performance.now() - getStart;
-              statsGetCalls += 1;
-            } else {
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-            }
-            if (!value) continue;
-
-            if (tierViews[tier] !== undefined) {
-              tierViews[tier] += value;
-            }
-            continue;
-          }
-
-          if (parts[0] === "tview" && parts.length === 4) {
-            const [, vendor, tier, date] = parts;
-            if (!(date in dailyViews)) continue;
-            if (!vendorLegacyTierSeen[vendor]) vendorLegacyTierSeen[vendor] = new Set();
-            vendorLegacyTierSeen[vendor].add(tier);
-            continue;
-          }
-
-          if (parts[0] === "planview" && parts.length === 3) {
-            const [, plan, date] = parts;
-            if (!(date in dailyViews)) continue;
-
-            let value;
-            if (statsTimingEnabled) {
-              const getStart = performance.now();
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-              statsGetMs += performance.now() - getStart;
-              statsGetCalls += 1;
-            } else {
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-            }
-            if (!value) continue;
-
-            if (tierViews[plan] !== undefined) {
-              tierViews[plan] += value;
-            }
-            continue;
-          }
-
-          if (parts[0] === "planview" && parts.length === 4) {
-            const [, vendor, plan, date] = parts;
-            if (!(date in dailyViews)) continue;
-
-            let value;
-            if (statsTimingEnabled) {
-              const getStart = performance.now();
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-              statsGetMs += performance.now() - getStart;
-              statsGetCalls += 1;
-            } else {
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-            }
-            if (!value) continue;
-
-            if (!vendorPlanAgg[vendor]) vendorPlanAgg[vendor] = {};
-            vendorPlanAgg[vendor][plan] =
-              (vendorPlanAgg[vendor][plan] || 0) + value;
-            continue;
-          }
-
-          if (parts[0] === "tview") {
-            continue;
-          }
-
-          if (parts[0] === "plcview" && parts.length === 4) {
-            const [, vendor, placement, date] = parts;
-            if (!(date in dailyViews)) continue;
-
-            let value;
-            if (statsTimingEnabled) {
-              const getStart = performance.now();
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-              statsGetMs += performance.now() - getStart;
-              statsGetCalls += 1;
-            } else {
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-            }
-            if (!value) continue;
-
-            if (!placementAgg[vendor]) placementAgg[vendor] = {};
-            placementAgg[vendor][placement] =
-              (placementAgg[vendor][placement] || 0) + value;
-            continue;
-          }
-
-          if (parts[0] === "pview" && parts.length === 3) {
-            continue;
-          }
-
-          if (parts[0] === "view" && parts.length === 3) {
-            const [, vendor, date] = parts;
-            if (!(date in dailyViews)) continue;
-
-            let value;
-            if (statsTimingEnabled) {
-              const getStart = performance.now();
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-              statsGetMs += performance.now() - getStart;
-              statsGetCalls += 1;
-            } else {
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-            }
-            if (!value) continue;
-
-            viewAgg[vendor] = (viewAgg[vendor] || 0) + value;
-            dailyViews[date] += value;
-            continue;
-          }
-
-          if (parts[0] === "uview" && parts.length === 3) {
-            const [, vendor, date] = parts;
-            if (!(date in dailyUniqueViews)) continue;
-
-            let value;
-            if (statsTimingEnabled) {
-              const getStart = performance.now();
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-              statsGetMs += performance.now() - getStart;
-              statsGetCalls += 1;
-            } else {
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-            }
-            if (!value) continue;
-
-            uniqueAgg[vendor] = (uniqueAgg[vendor] || 0) + value;
-            dailyUniqueViews[date] += value;
-            continue;
-          }
-
-          if (parts[0] === "pview" && parts.length === 4) {
-            const [, vendor, page, date] = parts;
-            if (!(date in dailyViews)) continue;
-
-            let value;
-            if (statsTimingEnabled) {
-              const getStart = performance.now();
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-              statsGetMs += performance.now() - getStart;
-              statsGetCalls += 1;
-            } else {
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-            }
-            if (!value) continue;
-
-            if (!pageAgg[vendor]) pageAgg[vendor] = {};
-            pageAgg[vendor][page] =
-              (pageAgg[vendor][page] || 0) + value;
-            continue;
-          }
-
-          if (parts[0] === "ref" && parts.length === 5) {
-            const [, vendor, scope, bucket, date] = parts;
-            if (!(date in dailyViews)) continue;
-
-            let value;
-            if (statsTimingEnabled) {
-              const getStart = performance.now();
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-              statsGetMs += performance.now() - getStart;
-              statsGetCalls += 1;
-            } else {
-              value = parseInt(await env.CLICKS.get(key.name)) || 0;
-            }
-            if (!value) continue;
-
-            if (!refAgg[vendor]) {
-              refAgg[vendor] = { internal: {}, external: {} };
-            }
-
-            if (scope === "int") {
-              refAgg[vendor].internal[bucket] =
-                (refAgg[vendor].internal[bucket] || 0) + value;
-            } else if (scope === "ext") {
-              refAgg[vendor].external[bucket] =
-                (refAgg[vendor].external[bucket] || 0) + value;
-            }
-            continue;
-          }
-
-          if (parts.length !== 3) continue;
-
-          const [vendor, type, date] = parts;
-          if (!ALLOWED_CLICK_TYPES.has(type)) continue;
-          if (!(date in dailyTotals)) continue;
-
-          let value;
-          if (statsTimingEnabled) {
-            const getStart = performance.now();
-            value = parseInt(await env.CLICKS.get(key.name)) || 0;
-            statsGetMs += performance.now() - getStart;
-            statsGetCalls += 1;
-          } else {
-            value = parseInt(await env.CLICKS.get(key.name)) || 0;
-          }
-          if (!value) continue;
-
-          if (!vendorAgg[vendor]) {
-            vendorAgg[vendor] = { website: 0, instagram: 0 };
-          }
-
-          vendorAgg[vendor][type] += value;
-          dailyTotals[date] += value;
-        }
-
-        cursor = list.cursor;
-      } while (cursor);
-
-      for (const [vendor, uniques] of Object.entries(uniqueAgg)) {
-        const views = viewAgg[vendor] || 0;
-        if (uniques > views) {
-          uniqueAgg[vendor] = views;
-        }
-      }
-
-      for (const [date, uniques] of Object.entries(dailyUniqueViews)) {
-        const views = dailyViews[date] || 0;
-        if (uniques > views) {
-          dailyUniqueViews[date] = views;
-        }
-      }
-
-      const vendorsSet = new Set([
-        ...Object.keys(vendorAgg),
-        ...Object.keys(viewAgg),
-        ...Object.keys(uniqueAgg),
-        ...Object.keys(pageAgg),
-        ...Object.keys(refAgg),
-        ...Object.keys(placementAgg)
-      ]);
-
-      const vendors = Array.from(vendorsSet).map(vendor => {
-        const clickCounts = vendorAgg[vendor] || {
-          website: 0,
-          instagram: 0
-        };
-        const pages = pageAgg[vendor] || {};
-        const refs = refAgg[vendor] || { internal: {}, external: {} };
-        const metadataEnforced = isMetadataEnforcedForSite(site);
-        const vendorMeta = metadataEnforced ? getVendorMeta(vendor) : null;
-        const observedPlans = Object.entries(vendorPlanAgg[vendor] || {})
-          .sort((a, b) => b[1] - a[1])
-          .map(([plan]) => plan);
-        const topObservedPlan = observedPlans[0] || "";
-        const metadataPlan = metadataEnforced ? getVendorPlan(vendor) : "";
-        const plan = metadataEnforced ? metadataPlan : topObservedPlan || "unknown";
-        const placementsActive =
-          metadataEnforced && vendorMeta ? getActivePlacements(vendor) : [];
-        const placementsCounts = Object.entries(placementAgg[vendor] || {})
-          .sort((a, b) => b[1] - a[1])
-          .map(([placement, count]) => ({ placement, count }));
-        let metaStatus = "n/a";
-        if (metadataEnforced && vendorMeta) {
-          metaStatus = "ok";
-          const seen = vendorLegacyTierSeen[vendor];
-          if (seen) {
-            for (const tier of seen) {
-              if (tier !== plan) {
-                metaStatus = "mismatch";
-                console.warn("stats:vendor-plan-mismatch", {
-                  vendor,
-                  plan,
-                  tier
-                });
-                break;
-              }
-            }
-          }
-        } else if (metadataEnforced) {
-          metaStatus = "missing";
-          console.warn("stats:vendor-missing", { vendor });
-        }
-
-        const topInternal = Object.entries(refs.internal)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 10)
-          .map(([bucket, count]) => ({ bucket, count }));
-
-        const topExternal = Object.entries(refs.external)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 10)
-          .map(([domain, count]) => ({ domain, count }));
-
-        const pagesBreakdown = Object.entries(pages)
-          .sort((a, b) => b[1] - a[1])
-          .map(([page, count]) => ({ page, count }));
-
-        return {
-          vendor,
-          city: "",
-          agencySlug: "",
-          pageType: "",
-          plan,
-          placementsActive,
-          placements: placementsCounts,
-          metaStatus,
-          website: clickCounts.website,
-          instagram: clickCounts.instagram,
-          views: viewAgg[vendor] || 0,
-          uniqueViews: uniqueAgg[vendor] || 0,
-          pages: pagesBreakdown,
-          referrers: {
-            internal: topInternal,
-            external: topExternal
-          }
-        };
-      });
-
-      const daily = dates.map(date => ({
-        date,
-        total: dailyTotals[date] || 0
-      }));
-      const dailyViewTotals = dates.map(date => ({
-        date,
-        total: dailyViews[date] || 0
-      }));
-      const dailyUniqueViewTotals = dates.map(date => ({
-        date,
-        total: dailyUniqueViews[date] || 0
-      }));
-
-      const payload: Record<string, unknown> = {
-        site,
-        range,
-        contractVersion: CONTRACT_VERSION,
-        generatedAt: new Date().toISOString(),
-        vendors,
-        daily,
-        dailyViews: dailyViewTotals,
-        dailyUniqueViews: dailyUniqueViewTotals,
-        tierViews,
-        dataSource: "kv"
-      };
-      if (dataWarning) {
-        payload.dataWarning = dataWarning;
-      }
-      let body;
-      if (statsTimingEnabled) {
-        const serializeStart = performance.now();
-        body = JSON.stringify(payload);
-        statsSerializeMs = performance.now() - serializeStart;
-      } else {
-        body = JSON.stringify(payload);
-      }
-      let statsTimingHeader = "";
-      if (statsTimingEnabled) {
-        const totalMs = performance.now() - statsStart;
-        const listMsRounded = Math.round(statsListMs);
-        const getMsRounded = Math.round(statsGetMs);
-        const serializeMsRounded = Math.round(statsSerializeMs);
-        const totalMsRounded = Math.round(totalMs);
-        statsTimingHeader = [
-          `list;dur=${listMsRounded}`,
-          `get;dur=${getMsRounded}`,
-          `serialize;dur=${serializeMsRounded}`,
-          `total;dur=${totalMsRounded}`
-        ].join(", ");
-        console.log("stats:timing", {
-          site,
-          range,
-          cfRay: statsRay,
-          listCalls: statsListCalls,
-          listMs: listMsRounded,
-          getCalls: statsGetCalls,
-          getMs: getMsRounded,
-          keysSeen: statsKeysSeen,
-          serializeMs: serializeMsRounded,
-          totalMs: totalMsRounded
-        });
-      }
-      const responseHeaders = new Headers({
-        "Content-Type": "application/json",
-        "Cache-Control": cacheControl
-      });
-      responseHeaders.set(DATA_SOURCE_HEADER, "kv");
-      if (dataWarning) {
-        responseHeaders.set(DATA_WARNING_HEADER, dataWarning);
-      }
-      if (statsTimingHeader) {
-        responseHeaders.set("Server-Timing", statsTimingHeader);
-      }
-      const kvResponse = new Response(body, {
-        status: 200,
-        headers: responseHeaders
-      });
-      if (cacheEnabled) {
-        kvResponse.headers.set(CACHE_STATUS_HEADER, "MISS");
-        if (cacheKey && kvResponse.status === 200 && !dataWarning) {
-          await caches.default.put(cacheKey, kvResponse.clone());
-        }
-      }
-      return kvResponse;
     }
 
     /* ----------------------------
@@ -2875,143 +2510,59 @@ export default {
         }
       }
 
-      let dataWarning: string | undefined;
-      if (analyticsEngineConfigured(env)) {
-        try {
-          console.log("export:ae", {
-            cached: false,
-            range,
-            site: analyticsSite,
-            vendor
-          });
-          const csv = await buildVendorCsvFromAnalyticsEngine({
-            env,
-            site: analyticsSite,
-            vendor,
-            dates
-          });
-
-          const responseHeaders = new Headers({
-            "Content-Type": "text/csv; charset=utf-8",
-            "Cache-Control": cacheControl,
-            ...corsHeaders
-          });
-          responseHeaders.set(DATA_SOURCE_HEADER, "ae");
-
-          const aeResponse = new Response(csv, { headers: responseHeaders });
-          if (cacheEnabled) {
-            aeResponse.headers.set(CACHE_STATUS_HEADER, "MISS");
-            if (cacheKey && aeResponse.status === 200 && !dataWarning) {
-              await caches.default.put(cacheKey, aeResponse.clone());
-            }
+      if (!analyticsEngineConfigured(env)) {
+        return new Response("Analytics Engine is not configured for /api/export/vendor.csv", {
+          status: 503,
+          headers: {
+            "Cache-Control": "no-store",
+            ...corsHeaders,
+            [DATA_SOURCE_HEADER]: "ae",
+            [DATA_WARNING_HEADER]: "ae_unconfigured"
           }
-          return aeResponse;
-        } catch (error) {
-          dataWarning = "ae_failed";
-          console.error("vendor-export:analytics-engine-failed", error);
-        }
-      }
-      console.log("export:kv", {
-        cached: false,
-        range,
-        site: analyticsSite,
-        vendor,
-        fallback: dataWarning ? "ae_failed" : undefined
-      });
-
-      const perDate = Object.fromEntries(
-        dates.map(date => [
-          date,
-          {
-            views: 0,
-            uniqueViews: 0,
-            website: 0,
-            instagram: 0
-          }
-        ])
-      );
-
-      let cursor;
-      do {
-        const list = await env.CLICKS.list({ cursor });
-
-        for (const key of list.keys) {
-          const parts = key.name.split(":");
-          if (parts[0] === "rollup") continue;
-          if (parts[0] === "rl" || parts[0] === "uviewlock") continue;
-          if (parts[0] === "raw") continue;
-
-          if (parts[0] === "view" && parts.length === 3) {
-            const [, keyVendor, date] = parts;
-            if (keyVendor !== vendor || !(date in perDate)) continue;
-            const value = parseInt(await env.CLICKS.get(key.name)) || 0;
-            if (!value) continue;
-            perDate[date].views += value;
-            continue;
-          }
-
-          if (parts[0] === "uview" && parts.length === 3) {
-            const [, keyVendor, date] = parts;
-            if (keyVendor !== vendor || !(date in perDate)) continue;
-            const value = parseInt(await env.CLICKS.get(key.name)) || 0;
-            if (!value) continue;
-            perDate[date].uniqueViews += value;
-            continue;
-          }
-
-          if (parts.length !== 3) continue;
-          const [keyVendor, type, date] = parts;
-          if (keyVendor !== vendor) continue;
-          if (!["website", "instagram"].includes(type)) continue;
-          if (!(date in perDate)) continue;
-
-          const value = parseInt(await env.CLICKS.get(key.name)) || 0;
-          if (!value) continue;
-
-          perDate[date][type] += value;
-        }
-
-        cursor = list.cursor;
-      } while (cursor);
-
-      const header =
-        "date,views,unique_views,website_clicks,instagram_clicks,ctr\n";
-      const rows = dates.map(date => {
-        const entry = perDate[date];
-        const clicks = entry.website + entry.instagram;
-        const ctr =
-          entry.views > 0
-            ? (clicks / entry.views).toFixed(4)
-            : "0.0000";
-        return [
-          date,
-          entry.views,
-          entry.uniqueViews,
-          entry.website,
-          entry.instagram,
-          ctr
-        ].join(",");
-      });
-      const csv = `${header}${rows.join("\n")}\n`;
-
-      const responseHeaders = new Headers({
-        "Content-Type": "text/csv; charset=utf-8",
-        "Cache-Control": cacheControl,
-        ...corsHeaders
-      });
-      responseHeaders.set(DATA_SOURCE_HEADER, "kv");
-      if (dataWarning) {
-        responseHeaders.set(DATA_WARNING_HEADER, dataWarning);
+        });
       }
 
-      const kvResponse = new Response(csv, { headers: responseHeaders });
-      if (cacheEnabled) {
-        kvResponse.headers.set(CACHE_STATUS_HEADER, "MISS");
-        if (cacheKey && kvResponse.status === 200 && !dataWarning) {
-          await caches.default.put(cacheKey, kvResponse.clone());
+      try {
+        console.log("export:ae", {
+          cached: false,
+          range,
+          site: analyticsSite,
+          vendor
+        });
+        const csv = await buildVendorCsvFromAnalyticsEngine({
+          env,
+          site: analyticsSite,
+          vendor,
+          dates
+        });
+
+        const responseHeaders = new Headers({
+          "Content-Type": "text/csv; charset=utf-8",
+          "Cache-Control": cacheControl,
+          ...corsHeaders
+        });
+        responseHeaders.set(DATA_SOURCE_HEADER, "ae");
+
+        const aeResponse = new Response(csv, { headers: responseHeaders });
+        if (cacheEnabled) {
+          aeResponse.headers.set(CACHE_STATUS_HEADER, "MISS");
+          if (cacheKey && aeResponse.status === 200) {
+            await caches.default.put(cacheKey, aeResponse.clone());
+          }
         }
+        return aeResponse;
+      } catch (error) {
+        console.error("vendor-export:analytics-engine-failed", error);
+        return new Response("Analytics Engine query failed for /api/export/vendor.csv", {
+          status: 503,
+          headers: {
+            "Cache-Control": "no-store",
+            ...corsHeaders,
+            [DATA_SOURCE_HEADER]: "ae",
+            [DATA_WARNING_HEADER]: "ae_failed"
+          }
+        });
       }
-      return kvResponse;
     }
 
     /* ----------------------------
@@ -3115,41 +2666,12 @@ export default {
        DEBUG KV INSPECTION (DEV-ONLY)
        ---------------------------- */
     if (url.pathname === "/_debug/kv") {
-      if (env.DEBUG_MODE !== "1") {
-        return new Response("Not found", { status: 404 });
-      }
-
-      if (request.method !== "GET") {
-        return new Response("Method not allowed", {
-          status: 405,
-          headers: { Allow: "GET" }
-        });
-      }
-
-      const auth = request.headers.get("Authorization");
-      if (auth !== `Bearer ${env.ANALYTICS_API_TOKEN}`) {
-        return new Response("Unauthorized", { status: 401 });
-      }
-
-      const list = await env.CLICKS.list();
-      const samples = {};
-      for (const key of list.keys.slice(0, 50)) {
-        samples[key.name] = await env.CLICKS.get(key.name);
-      }
-
-      return new Response(
-        JSON.stringify({
-          keys: list.keys,
-          cursor: list.cursor,
-          samples
-        }),
-        {
-          headers: {
-            "Content-Type": "application/json",
-            "Cache-Control": "no-store"
-          }
+      return new Response("KV debug endpoint removed (AE-only mode)", {
+        status: 410,
+        headers: {
+          "Cache-Control": "no-store"
         }
-      );
+      });
     }
 
     return new Response("Not found", { status: 404 });
@@ -3158,218 +2680,8 @@ export default {
   /* ----------------------------
      DAILY → MONTHLY ROLLUP (CRON)
      ---------------------------- */
-  async scheduled(event, env) {
-    const now = env.CRON_NOW ? new Date(env.CRON_NOW) : new Date();
-    console.log("cron:start", now.toISOString());
-    const isDryRun = parseBoolFlag(env.CRON_DRY_RUN);
-    if (isDryRun) {
-      console.log("cron:dry-run");
-    }
-    const maxKeysRaw = env.CRON_MAX_KEYS;
-    const maxKeys =
-      typeof maxKeysRaw === "number"
-        ? maxKeysRaw
-        : parseInt(maxKeysRaw || "0", 10);
-    const cutoffDate = (() => {
-      const year = now.getUTCFullYear();
-      const monthIndex = now.getUTCMonth() - 2;
-      const cutoff = new Date(Date.UTC(year, monthIndex, 1));
-      return cutoff.toISOString().slice(0, 10);
-    })();
-
-    const lockKey = "rollup:lock";
-    const lock = await env.CLICKS.get(lockKey);
-    if (lock) {
-      return;
-    }
-
-    await env.CLICKS.put(lockKey, now.toISOString(), {
-      expirationTtl: 600
-    });
-
-    const snapshotRowsByMonth = new Map();
-    const snapshotAllRowsByMonth = new Map();
-    const keysToDelete = [];
-    let processedKeys = 0;
-    let aborted = false;
-
-    let cursor;
-    try {
-      do {
-        const list = await env.CLICKS.list({ cursor });
-
-        for (const key of list.keys) {
-          const parts = key.name.split(":");
-          if (parts[0] === "rollup" || parts[0] === "rl") continue;
-          if (parts[0] === "uviewlock") continue;
-
-          let monthlyKey = null;
-          let snapshotRow = null;
-          let date = null;
-
-          if (parts.length === 3 && ["website", "instagram"].includes(parts[1])) {
-            const [vendor, type, clickDate] = parts;
-            date = clickDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:${vendor}:${type}:${month}`;
-            snapshotRow = `${vendor},${type},${date}`;
-          } else if (parts[0] === "tview" && parts.length === 3) {
-            const [, tier, viewDate] = parts;
-            date = viewDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:tview:${tier}:${month}`;
-          } else if (parts[0] === "tview" && parts.length === 4) {
-            const [, vendor, tier, viewDate] = parts;
-            date = viewDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:tview:${vendor}:${tier}:${month}`;
-          } else if (parts[0] === "planview" && parts.length === 3) {
-            const [, plan, viewDate] = parts;
-            date = viewDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:planview:${plan}:${month}`;
-          } else if (parts[0] === "planview" && parts.length === 4) {
-            const [, vendor, plan, viewDate] = parts;
-            date = viewDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:planview:${vendor}:${plan}:${month}`;
-          } else if (parts[0] === "plcview" && parts.length === 3) {
-            const [, placement, viewDate] = parts;
-            date = viewDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:plcview:${placement}:${month}`;
-          } else if (parts[0] === "plcview" && parts.length === 4) {
-            const [, vendor, placement, viewDate] = parts;
-            date = viewDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:plcview:${vendor}:${placement}:${month}`;
-          } else if (parts[0] === "view" && parts.length === 3) {
-            const [, vendor, viewDate] = parts;
-            date = viewDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:view:${vendor}:${month}`;
-          } else if (parts[0] === "uview" && parts.length === 3) {
-            const [, vendor, viewDate] = parts;
-            date = viewDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:uview:${vendor}:${month}`;
-          } else if (parts[0] === "pview" && parts.length === 3) {
-            const [, plan, viewDate] = parts;
-            date = viewDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:pview:${plan}:${month}`;
-          } else if (parts[0] === "pview" && parts.length === 4) {
-            const [, vendor, page, viewDate] = parts;
-            date = viewDate;
-            const month = date.slice(0, 7);
-            if (PLAN_ENUM.has(page)) {
-              monthlyKey = `rollup:pview:${vendor}:${page}:${month}`;
-            } else {
-              monthlyKey = `rollup:pview:${vendor}:${page}:${month}`;
-            }
-          } else if (parts[0] === "ref" && parts.length === 5) {
-            const [, vendor, scope, bucket, refDate] = parts;
-            date = refDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:ref:${vendor}:${scope}:${bucket}:${month}`;
-          } else if (parts[0] === "raw" && parts.length === 2) {
-            const [, rawDate] = parts;
-            date = rawDate;
-            const month = date.slice(0, 7);
-            monthlyKey = `rollup:raw:${month}`;
-          } else {
-            continue;
-          }
-
-          if (date >= cutoffDate) continue;
-
-          processedKeys += 1;
-          if (maxKeys > 0 && processedKeys > maxKeys) {
-            console.warn("cron:abort:max-keys", {
-              processedKeys,
-              maxKeys
-            });
-            aborted = true;
-            break;
-          }
-
-          const value = parseInt(await env.CLICKS.get(key.name)) || 0;
-          if (value > 0) {
-            if (env.CLICKS_ARCHIVE) {
-              await env.CLICKS_ARCHIVE.put(key.name, String(value));
-            }
-            if (snapshotRow && env.CLICKS_SNAPSHOTS) {
-              const month = date.slice(0, 7);
-              if (!snapshotRowsByMonth.has(month)) {
-                snapshotRowsByMonth.set(month, []);
-              }
-              snapshotRowsByMonth.get(month).push(
-                `${snapshotRow},${value}`
-              );
-            }
-
-            if (env.CLICKS_SNAPSHOTS) {
-              const month = date.slice(0, 7);
-              if (!snapshotAllRowsByMonth.has(month)) {
-                snapshotAllRowsByMonth.set(month, []);
-              }
-              snapshotAllRowsByMonth.get(month).push(
-                `${key.name},${value}`
-              );
-            }
-
-            const existing =
-              parseInt(await env.CLICKS.get(monthlyKey)) || 0;
-
-            await env.CLICKS.put(
-              monthlyKey,
-              String(existing + value)
-            );
-          }
-
-          if (!isDryRun) {
-            keysToDelete.push(key.name);
-          }
-        }
-
-        if (aborted) break;
-        cursor = list.cursor;
-      } while (cursor);
-
-      if (env.CLICKS_SNAPSHOTS) {
-        const snapshotPrefix = "smle/snapshots";
-        const timestamp = now.toISOString().replace(/[:.]/g, "-");
-        for (const [month, rows] of snapshotRowsByMonth.entries()) {
-          const header = "vendor,type,date,count\n";
-          const body = rows.join("\n");
-          const csv = `${header}${body}\n`;
-          await env.CLICKS_SNAPSHOTS.put(
-            `${snapshotPrefix}/${month}/${timestamp}.csv`,
-            csv
-          );
-        }
-
-        if (snapshotAllRowsByMonth.size > 0) {
-          const rawPrefix = "smle/snapshots-raw";
-          const rawHeader = "key,value\n";
-          const rawTimestamp = timestamp;
-          for (const [month, rows] of snapshotAllRowsByMonth.entries()) {
-            const body = rows.join("\n");
-            const csv = `${rawHeader}${body}\n`;
-            await env.CLICKS_SNAPSHOTS.put(
-              `${rawPrefix}/${month}/${rawTimestamp}.csv`,
-              csv
-            );
-          }
-        }
-      }
-      if (!isDryRun) {
-        for (const keyName of keysToDelete) {
-          await env.CLICKS.delete(keyName);
-        }
-      }
-    } finally {
-      await env.CLICKS.delete(lockKey);
-    }
+  async scheduled() {
+    // KV rollups/snapshots were removed in AE-only mode.
+    return;
   }
 };

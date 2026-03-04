@@ -1,9 +1,5 @@
-import { afterAll, beforeAll, beforeEach, expect, test, vi } from "vitest";
-import { Miniflare } from "miniflare";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import worker from "../src/worker";
-
-let mf: Miniflare;
-let CLICKS: any;
 
 const makeCache = () => {
   const store = new Map<string, Response>();
@@ -24,36 +20,28 @@ const makeCache = () => {
   };
 };
 
-beforeAll(async () => {
-  mf = new Miniflare({
-    modules: true,
-    script: "export default { fetch() { return new Response('ok'); } }",
-    kvNamespaces: ["CLICKS"]
-  });
-
-  CLICKS = await mf.getKVNamespace("CLICKS");
-});
-
-beforeEach(async () => {
-  const list = await CLICKS.list();
-  await Promise.all(list.keys.map(key => CLICKS.delete(key.name)));
+beforeEach(() => {
   vi.stubGlobal("caches", { default: makeCache() });
 });
 
-afterAll(async () => {
+afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
-  await mf.dispose();
 });
 
-test("stats response caches when enabled", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  await CLICKS.put(`dave-blake:website:${today}`, "2");
+const env = {
+  ANALYTICS_API_TOKEN: "test-secret",
+  ANALYTICS_ENGINE_ACCOUNT_ID: "acct",
+  ANALYTICS_ENGINE_API_TOKEN: "token",
+  ANALYTICS_ENGINE_DATASET: "analytics_events",
+  ANALYTICS_CACHE: "1"
+} as any;
 
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret",
-    ANALYTICS_CACHE: "1"
-  } as any;
+test("stats response caches when enabled", async () => {
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+    ok: true,
+    json: async () => ({ data: [] })
+  } as any);
 
   const request = new Request(
     "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
@@ -69,17 +57,14 @@ test("stats response caches when enabled", async () => {
   const second = await worker.fetch(request, env);
   expect(second.status).toBe(200);
   expect(second.headers.get("X-Cache")).toBe("HIT");
+  expect(fetchSpy).toHaveBeenCalledTimes(6);
 });
 
 test("export response caches when enabled", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  await CLICKS.put(`view:dave-blake:${today}`, "1");
-
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret",
-    ANALYTICS_CACHE: "1"
-  } as any;
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+    ok: true,
+    json: async () => ({ data: [] })
+  } as any);
 
   const request = new Request(
     "https://example.com/api/export/vendor.csv?vendor=dave-blake&range=7d&site=StartMyLoveEngine",
@@ -95,22 +80,23 @@ test("export response caches when enabled", async () => {
   const second = await worker.fetch(request, env);
   expect(second.status).toBe(200);
   expect(second.headers.get("X-Cache")).toBe("HIT");
+  expect(fetchSpy).toHaveBeenCalledTimes(3);
 });
 
 test("cache keys are scoped by auth token", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  await CLICKS.put(`dave-blake:website:${today}`, "1");
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+    ok: true,
+    json: async () => ({ data: [] })
+  } as any);
 
   const envA = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "token-a",
-    ANALYTICS_CACHE: "1"
+    ...env,
+    ANALYTICS_API_TOKEN: "token-a"
   } as any;
 
   const envB = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "token-b",
-    ANALYTICS_CACHE: "1"
+    ...env,
+    ANALYTICS_API_TOKEN: "token-b"
   } as any;
 
   const requestA = new Request(
@@ -138,4 +124,6 @@ test("cache keys are scoped by auth token", async () => {
   const third = await worker.fetch(requestB, envB);
   expect(third.status).toBe(200);
   expect(third.headers.get("X-Cache")).toBe("HIT");
+
+  expect(fetchSpy).toHaveBeenCalledTimes(12);
 });

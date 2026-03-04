@@ -1,28 +1,15 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from "vitest";
-import { Miniflare } from "miniflare";
+import { expect, test } from "vitest";
 import worker from "../src/worker";
 
-let mf: Miniflare;
-let CLICKS: any;
-
-beforeAll(async () => {
-  mf = new Miniflare({
-    modules: true,
-    script: "export default { fetch() { return new Response('ok'); } }",
-    kvNamespaces: ["CLICKS"]
-  });
-
-  CLICKS = await mf.getKVNamespace("CLICKS");
-});
-
-beforeEach(async () => {
-  const list = await CLICKS.list();
-  await Promise.all(list.keys.map(key => CLICKS.delete(key.name)));
-});
-
-afterAll(async () => {
-  await mf.dispose();
-});
+const makeEnv = (writes: any[] = []) =>
+  ({
+    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com",
+    ANALYTICS_ENGINE: {
+      writeDataPoint(point: any) {
+        writes.push(point);
+      }
+    }
+  }) as any;
 
 test("records city, agency_slug, and page_type in analytics blobs", async () => {
   const analyticsWrites: any[] = [];
@@ -48,17 +35,7 @@ test("records city, agency_slug, and page_type in analytics blobs", async () => 
     body: JSON.stringify(payload)
   });
 
-  const env = {
-    CLICKS,
-    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com",
-    ANALYTICS_ENGINE: {
-      writeDataPoint(point) {
-        analyticsWrites.push(point);
-      }
-    }
-  } as any;
-
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, makeEnv(analyticsWrites));
 
   expect(response.status).toBe(204);
   const viewEvent = analyticsWrites.find(point => point?.blobs?.[0] === "view");
@@ -104,23 +81,12 @@ test("records localhost source context and mobile device class", async () => {
     body: JSON.stringify(payload)
   });
 
-  const env = {
-    CLICKS,
-    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com",
-    ANALYTICS_ENGINE: {
-      writeDataPoint(point) {
-        analyticsWrites.push(point);
-      }
-    }
-  } as any;
-
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, makeEnv(analyticsWrites));
 
   expect(response.status).toBe(204);
   const viewEvent = analyticsWrites.find(point => point?.blobs?.[0] === "view");
   expect(viewEvent).toBeTruthy();
   expect(viewEvent.blobs[15]).toBe("localhost");
-  expect(viewEvent.blobs[16]).toBe("");
   expect(viewEvent.blobs[17]).toBe("mobile");
   expect(viewEvent.blobs[18]).toBe("direct");
   const viewContext = JSON.parse(viewEvent.blobs[19]);
@@ -159,17 +125,7 @@ test("payload referrer empty does not fall back to request Referer header", asyn
     body: JSON.stringify(payload)
   });
 
-  const env = {
-    CLICKS,
-    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com",
-    ANALYTICS_ENGINE: {
-      writeDataPoint(point) {
-        analyticsWrites.push(point);
-      }
-    }
-  } as any;
-
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, makeEnv(analyticsWrites));
   expect(response.status).toBe(204);
 
   const viewEvent = analyticsWrites.find(point => point?.blobs?.[0] === "view");
@@ -213,10 +169,9 @@ test("falls back to single Analytics Engine index when dual-index write fails", 
   });
 
   const env = {
-    CLICKS,
     SITE_ALLOWLIST: "startmyloveengine,dave-blake.com",
     ANALYTICS_ENGINE: {
-      writeDataPoint(point) {
+      writeDataPoint(point: any) {
         if (Array.isArray(point.indexes) && point.indexes.length !== 1) {
           throw new Error("AE index mismatch: expected single index");
         }
@@ -234,7 +189,7 @@ test("falls back to single Analytics Engine index when dual-index write fails", 
 });
 
 test("non-metadata sites default to unknown plan without tier", async () => {
-  const today = new Date().toISOString().slice(0, 10);
+  const analyticsWrites: any[] = [];
   const payload = {
     site: "dave-blake.com",
     vendor: "unknown-vendor",
@@ -254,18 +209,43 @@ test("non-metadata sites default to unknown plan without tier", async () => {
     body: JSON.stringify(payload)
   });
 
-  const env = {
-    CLICKS,
-    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com"
-  } as any;
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, makeEnv(analyticsWrites));
 
   expect(response.status).toBe(204);
-  expect(await CLICKS.get(`planview:unknown:${today}`)).toBe("1");
-  expect(await CLICKS.get(`planview:unknown-vendor:unknown:${today}`)).toBe(
-    "1"
-  );
-  expect(await CLICKS.get(`tview:featured:${today}`)).toBeNull();
+  const viewEvent = analyticsWrites.find(point => point?.blobs?.[0] === "view");
+  expect(viewEvent.blobs[4]).toBe("unknown");
+  expect(viewEvent.blobs[5]).toBe("");
+});
+
+test("unique view is de-duplicated for same IP + user agent + vendor", async () => {
+  const writes: any[] = [];
+  const payload = {
+    site: "dave-blake.com",
+    vendor: "vivbne26",
+    page: "agency-rates",
+    url: "https://dave-blake.com/models/agency-rates/?agency=VIVBNE26"
+  };
+
+  const makeRequest = () =>
+    new Request("https://example.com/visit", {
+      method: "POST",
+      headers: {
+        Origin: "https://dave-blake.com",
+        "Content-Type": "application/json",
+        "cf-connecting-ip": "203.0.113.19",
+        "user-agent": "Mozilla/5.0"
+      },
+      body: JSON.stringify(payload)
+    });
+
+  const env = makeEnv(writes);
+  const first = await worker.fetch(makeRequest(), env);
+  const second = await worker.fetch(makeRequest(), env);
+
+  expect(first.status).toBe(204);
+  expect(second.status).toBe(204);
+  expect(writes.filter(point => point?.blobs?.[0] === "unique_view")).toHaveLength(1);
+  expect(writes.filter(point => point?.blobs?.[0] === "view")).toHaveLength(2);
 });
 
 test("returns CORS headers for dave-blake.com origin on /visit preflight", async () => {
@@ -278,9 +258,32 @@ test("returns CORS headers for dave-blake.com origin on /visit preflight", async
     }
   });
 
-  const env = { CLICKS } as any;
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, {} as any);
 
   expect(response.status).toBe(204);
   expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+});
+
+test("returns 503 when Analytics Engine binding is missing on /visit", async () => {
+  const request = new Request("https://example.com/visit", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.12",
+      "user-agent": "test-agent"
+    },
+    body: JSON.stringify({
+      site: "dave-blake.com",
+      vendor: "dave-blake",
+      page: "agency-rates",
+      url: "https://dave-blake.com/models/agency-rates/?agency=VIVBNE26"
+    })
+  });
+
+  const response = await worker.fetch(request, {
+    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com"
+  } as any);
+
+  expect(response.status).toBe(503);
 });

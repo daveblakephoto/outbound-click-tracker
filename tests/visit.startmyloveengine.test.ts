@@ -1,65 +1,21 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from "vitest";
-import { Miniflare } from "miniflare";
+import { expect, test } from "vitest";
 import worker from "../src/worker";
 
-let mf: Miniflare;
-let CLICKS: any;
+const makeEnv = (writes: any[] = []) =>
+  ({
+    ANALYTICS_ENGINE: {
+      writeDataPoint(point: any) {
+        writes.push(point);
+      }
+    }
+  }) as any;
 
-beforeAll(async () => {
-  mf = new Miniflare({
-    modules: true,
-    script: "export default { fetch() { return new Response('ok'); } }",
-    kvNamespaces: ["CLICKS"]
-  });
-
-  CLICKS = await mf.getKVNamespace("CLICKS");
-});
-
-beforeEach(async () => {
-  const list = await CLICKS.list();
-  await Promise.all(list.keys.map(key => CLICKS.delete(key.name)));
-});
-
-afterAll(async () => {
-  await mf.dispose();
-});
-
-test("increments tier view counters on visit", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  const payload = {
-    vendor: "dave-blake",
-    page: "profile",
-    tier: "featured",
-    referrer: "https://startmyloveengine.com/spotlight",
-    url: "https://startmyloveengine.com/vendors/dave-blake"
-  };
-
-  const request = new Request("https://example.com/visit", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "cf-connecting-ip": "203.0.113.10",
-      "user-agent": "test-agent"
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const env = { CLICKS } as any;
-  const response = await worker.fetch(request, env);
-
-  expect(response.status).toBe(204);
-  expect(await CLICKS.get(`tview:featured:${today}`)).toBe("1");
-  expect(await CLICKS.get(`tview:dave-blake:featured:${today}`)).toBe("1");
-  expect(await CLICKS.get(`planview:featured:${today}`)).toBe("1");
-  expect(await CLICKS.get(`planview:dave-blake:featured:${today}`)).toBe("1");
-});
-
-test("accepts unknown vendor and assigns unknown plan", async () => {
-  const today = new Date().toISOString().slice(0, 10);
+test("metadata-enforced site maps tier to unknown plan + placement", async () => {
+  const writes: any[] = [];
   const payload = {
     vendor: "unknown-vendor",
     page: "profile",
-    tier: "basic",
+    tier: "spotlight",
     referrer: "https://startmyloveengine.com/spotlight",
     url: "https://startmyloveengine.com/vendors/unknown-vendor"
   };
@@ -67,6 +23,7 @@ test("accepts unknown vendor and assigns unknown plan", async () => {
   const request = new Request("https://example.com/visit", {
     method: "POST",
     headers: {
+      Origin: "https://startmyloveengine.com",
       "Content-Type": "application/json",
       "cf-connecting-ip": "203.0.113.11",
       "user-agent": "test-agent"
@@ -74,13 +31,19 @@ test("accepts unknown vendor and assigns unknown plan", async () => {
     body: JSON.stringify(payload)
   });
 
-  const env = { CLICKS } as any;
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, makeEnv(writes));
 
   expect(response.status).toBe(204);
-  expect(await CLICKS.get(`view:unknown-vendor:${today}`)).toBe("1");
-  expect(await CLICKS.get(`planview:unknown:${today}`)).toBe("1");
-  expect(await CLICKS.get(`planview:unknown-vendor:unknown:${today}`)).toBe("1");
+  const view = writes.find(point => point?.blobs?.[0] === "view");
+  expect(view).toBeTruthy();
+  expect(view.blobs[4]).toBe("unknown");
+  expect(view.blobs[5]).toBe("spotlight");
+
+  const placementEvents = writes.filter(
+    point => point?.blobs?.[0] === "placement_view"
+  );
+  expect(placementEvents.length).toBeGreaterThanOrEqual(1);
+  expect(placementEvents.some(point => point.blobs[7] === "spotlight")).toBe(true);
 });
 
 test("returns CORS headers on /visit preflight", async () => {
@@ -93,8 +56,7 @@ test("returns CORS headers on /visit preflight", async () => {
     }
   });
 
-  const env = { CLICKS } as any;
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, {} as any);
 
   expect(response.status).toBe(204);
   expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
@@ -119,8 +81,7 @@ test("includes CORS headers on /visit errors", async () => {
     body: "{"
   });
 
-  const env = { CLICKS } as any;
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, makeEnv([]));
 
   expect(response.status).toBe(400);
   expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);

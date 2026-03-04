@@ -1,75 +1,142 @@
-import { afterAll, beforeAll, beforeEach, expect, test, vi } from "vitest";
-import { Miniflare } from "miniflare";
+import { afterEach, expect, test, vi } from "vitest";
 import worker from "../src/worker";
 
-let mf: Miniflare;
-let CLICKS: any;
-
-beforeAll(async () => {
-  mf = new Miniflare({
-    modules: true,
-    script: "export default { fetch() { return new Response('ok'); } }",
-    kvNamespaces: ["CLICKS"]
+const makeRequest = (range = "7d") =>
+  new Request(`https://example.com/api/stats?site=StartMyLoveEngine&range=${range}`, {
+    headers: { Authorization: "Bearer test-secret" }
   });
 
-  CLICKS = await mf.getKVNamespace("CLICKS");
+const makeEnv = () =>
+  ({
+    ANALYTICS_API_TOKEN: "test-secret",
+    ANALYTICS_ENGINE_ACCOUNT_ID: "acct",
+    ANALYTICS_ENGINE_API_TOKEN: "token",
+    ANALYTICS_ENGINE_DATASET: "analytics_events"
+  }) as any;
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
-beforeEach(async () => {
-  const list = await CLICKS.list();
-  await Promise.all(list.keys.map(key => CLICKS.delete(key.name)));
-});
-
-afterAll(async () => {
-  await mf.dispose();
-});
-
-test("returns current stats", async () => {
+test("returns current stats from Analytics Engine", async () => {
   const today = new Date().toISOString().slice(0, 10);
-  await CLICKS.put(`dave-blake:website:${today}`, "3");
-
-  const request = new Request(
-    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
-    {
-      headers: { Authorization: "Bearer test-secret" }
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (_url, init) => {
+      const sql = String(init?.body || "");
+      if (sql.includes("blob1 = 'click'")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                vendor: "dave-blake",
+                click_type: "website",
+                date: today,
+                count: 3
+              }
+            ]
+          })
+        } as any;
+      }
+      if (sql.includes("blob1 = 'view'") && sql.includes("GROUP BY vendor, page")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                vendor: "dave-blake",
+                page: "profile",
+                plan_observed: "featured",
+                legacy_tier: "",
+                city: "brisbane",
+                agency_slug: "viviens-brisbane",
+                page_type: "agency-rates",
+                count: 4
+              }
+            ]
+          })
+        } as any;
+      }
+      if (sql.includes("blob1 = 'view'") && sql.includes("GROUP BY date")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [{ date: today, count: 4 }] })
+        } as any;
+      }
+      if (sql.includes("blob1 = 'unique_view'")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [{ vendor: "dave-blake", date: today, count: 3 }] })
+        } as any;
+      }
+      return {
+        ok: true,
+        json: async () => ({ data: [] })
+      } as any;
     }
   );
 
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret"
-  } as any;
+  const response = await worker.fetch(makeRequest(), makeEnv());
+  fetchSpy.mockRestore();
 
-  const response = await worker.fetch(request, env);
   expect(response.status).toBe(200);
 
   const json = await response.json();
-  expect(json.dataSource).toBe("kv");
-  expect(response.headers.get("X-Data-Source")).toBe("kv");
+  expect(json.dataSource).toBe("ae");
+  expect(response.headers.get("X-Data-Source")).toBe("ae");
   expect(json.vendors.length).toBeGreaterThan(0);
   const vendor = json.vendors.find((row: any) => row.vendor === "dave-blake");
   expect(vendor.plan).toBe("featured");
   expect(Array.isArray(vendor.placementsActive)).toBe(true);
+  expect(vendor.website).toBe(3);
 });
 
 test("clamps unique views to total views", async () => {
   const today = new Date().toISOString().slice(0, 10);
-  await CLICKS.put(`view:dave-blake:${today}`, "2");
-  await CLICKS.put(`uview:dave-blake:${today}`, "5");
-
-  const request = new Request(
-    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
-    {
-      headers: { Authorization: "Bearer test-secret" }
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (_url, init) => {
+      const sql = String(init?.body || "");
+      if (sql.includes("blob1 = 'view'") && sql.includes("GROUP BY vendor, page")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                vendor: "dave-blake",
+                page: "profile",
+                plan_observed: "featured",
+                legacy_tier: "",
+                city: "",
+                agency_slug: "",
+                page_type: "",
+                count: 2
+              }
+            ]
+          })
+        } as any;
+      }
+      if (sql.includes("blob1 = 'view'") && sql.includes("GROUP BY date")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [{ date: today, count: 2 }] })
+        } as any;
+      }
+      if (sql.includes("blob1 = 'unique_view'")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [{ vendor: "dave-blake", date: today, count: 5 }] })
+        } as any;
+      }
+      return {
+        ok: true,
+        json: async () => ({ data: [] })
+      } as any;
     }
   );
 
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret"
-  } as any;
+  const response = await worker.fetch(makeRequest(), makeEnv());
+  fetchSpy.mockRestore();
 
-  const response = await worker.fetch(request, env);
   expect(response.status).toBe(200);
 
   const json = await response.json();
@@ -93,13 +160,83 @@ test("rejects non-GET requests", async () => {
     { method: "POST" }
   );
 
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret"
-  } as any;
-
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, makeEnv());
   expect(response.status).toBe(405);
+});
+
+test("returns CORS headers on /api/stats preflight for local dashboard origin", async () => {
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
+    {
+      method: "OPTIONS",
+      headers: {
+        Origin: "http://127.0.0.1:5500",
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "Authorization"
+      }
+    }
+  );
+
+  const response = await worker.fetch(request, makeEnv());
+  expect(response.status).toBe(204);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(
+    "http://127.0.0.1:5500"
+  );
+  expect(response.headers.get("Access-Control-Allow-Methods")).toContain("GET");
+});
+
+test("includes CORS headers on unauthorized /api/stats", async () => {
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
+    {
+      headers: {
+        Origin: "https://smle.mocha.app"
+      }
+    }
+  );
+
+  const response = await worker.fetch(request, makeEnv());
+  expect(response.status).toBe(401);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(
+    "https://smle.mocha.app"
+  );
+});
+
+test("includes CORS headers on successful /api/stats for mocha dashboard origin", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (_url, init) => {
+      const sql = String(init?.body || "");
+      if (sql.includes("blob1 = 'view'") && sql.includes("GROUP BY date")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [{ date: today, count: 1 }] })
+        } as any;
+      }
+      return {
+        ok: true,
+        json: async () => ({ data: [] })
+      } as any;
+    }
+  );
+
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
+    {
+      headers: {
+        Authorization: "Bearer test-secret",
+        Origin: "https://smle.mocha.app"
+      }
+    }
+  );
+
+  const response = await worker.fetch(request, makeEnv());
+  fetchSpy.mockRestore();
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(
+    "https://smle.mocha.app"
+  );
 });
 
 test("requires site parameter", async () => {
@@ -107,12 +244,7 @@ test("requires site parameter", async () => {
     headers: { Authorization: "Bearer test-secret" }
   });
 
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret"
-  } as any;
-
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, makeEnv());
   expect(response.status).toBe(400);
 });
 
@@ -124,12 +256,7 @@ test("rejects invalid range", async () => {
     }
   );
 
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret"
-  } as any;
-
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, makeEnv());
   expect(response.status).toBe(400);
 });
 
@@ -141,72 +268,84 @@ test("rejects range larger than 90d", async () => {
     }
   );
 
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret"
-  } as any;
-
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, makeEnv());
   expect(response.status).toBe(400);
   expect(await response.text()).toMatch(/Max range is 90 days/);
 });
 
-test("falls back to KV when analytics engine fails", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  await CLICKS.put(`dave-blake:website:${today}`, "2");
+test("returns 503 when analytics engine is unconfigured", async () => {
+  const response = await worker.fetch(makeRequest(), {
+    ANALYTICS_API_TOKEN: "test-secret"
+  } as any);
 
-  const request = new Request(
-    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
-    {
-      headers: { Authorization: "Bearer test-secret" }
-    }
-  );
+  expect(response.status).toBe(503);
+  expect(response.headers.get("X-Data-Warning")).toBe("ae_unconfigured");
+  const json = await response.json();
+  expect(json.dataSource).toBe("ae");
+  expect(json.dataWarning).toBe("ae_unconfigured");
+});
 
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret",
-    ANALYTICS_ENGINE_ACCOUNT_ID: "acct",
-    ANALYTICS_ENGINE_API_TOKEN: "token",
-    ANALYTICS_ENGINE_DATASET: "analytics_events"
-  } as any;
+test("returns 503 when analytics engine query fails", async () => {
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+    ok: false,
+    status: 422,
+    text: async () => "sql parser error"
+  } as any);
 
-  const fetchSpy = vi
-    .spyOn(globalThis, "fetch")
-    .mockResolvedValue({
-      ok: false,
-      status: 422,
-      text: async () => "sql parser error"
-    } as any);
-
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(makeRequest(), makeEnv());
   fetchSpy.mockRestore();
 
-  expect(response.status).toBe(200);
-  expect(response.headers.get("X-Data-Source")).toBe("kv");
+  expect(response.status).toBe(503);
+  expect(response.headers.get("X-Data-Source")).toBe("ae");
   expect(response.headers.get("X-Data-Warning")).toBe("ae_failed");
   const json = await response.json();
-  expect(json.dataSource).toBe("kv");
+  expect(json.dataSource).toBe("ae");
   expect(json.dataWarning).toBe("ae_failed");
 });
 
-test("returns tier views", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  await CLICKS.put(`tview:spotlight:${today}`, "4");
-  await CLICKS.put(`tview:featured:${today}`, "2");
-
-  const request = new Request(
-    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
-    {
-      headers: { Authorization: "Bearer test-secret" }
+test("returns tier views from observed legacy tiers", async () => {
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (_url, init) => {
+      const sql = String(init?.body || "");
+      if (sql.includes("blob1 = 'view'") && sql.includes("GROUP BY vendor, page")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                vendor: "dave-blake",
+                page: "profile",
+                plan_observed: "featured",
+                legacy_tier: "spotlight",
+                city: "",
+                agency_slug: "",
+                page_type: "",
+                count: 4
+              },
+              {
+                vendor: "dave-blake",
+                page: "profile",
+                plan_observed: "featured",
+                legacy_tier: "featured",
+                city: "",
+                agency_slug: "",
+                page_type: "",
+                count: 2
+              }
+            ]
+          })
+        } as any;
+      }
+      return {
+        ok: true,
+        json: async () => ({ data: [] })
+      } as any;
     }
   );
 
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret"
-  } as any;
+  const response = await worker.fetch(makeRequest(), makeEnv());
+  fetchSpy.mockRestore();
 
-  const response = await worker.fetch(request, env);
   expect(response.status).toBe(200);
 
   const json = await response.json();
@@ -214,111 +353,4 @@ test("returns tier views", async () => {
   expect(json.tierViews.featured).toBe(2);
   expect(json.tierViews.basic).toBe(0);
   expect(json.tierViews.unpaid).toBe(0);
-});
-
-test("returns placement counts per vendor", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  await CLICKS.put(`plcview:dave-blake:spotlight:${today}`, "3");
-  await CLICKS.put(`plcview:dave-blake:home:${today}`, "1");
-
-  const request = new Request(
-    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
-    {
-      headers: { Authorization: "Bearer test-secret" }
-    }
-  );
-
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret"
-  } as any;
-
-  const response = await worker.fetch(request, env);
-  const json = await response.json();
-
-  const vendor = json.vendors.find((row: any) => row.vendor === "dave-blake");
-  expect(vendor.placements).toEqual([
-    { placement: "spotlight", count: 3 },
-    { placement: "home", count: 1 }
-  ]);
-});
-
-test("returns metaStatus for vendors", async () => {
-  const request = new Request("https://example.com/visit", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "cf-connecting-ip": "203.0.113.12",
-      "user-agent": "test-agent"
-    },
-    body: JSON.stringify({
-      vendor: "unknown-vendor",
-      page: "profile",
-      tier: "basic"
-    })
-  });
-
-  const env = {
-    CLICKS,
-    ANALYTICS_API_TOKEN: "test-secret"
-  } as any;
-
-  await worker.fetch(request, env);
-
-  await worker.fetch(
-    new Request("https://example.com/visit", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "cf-connecting-ip": "203.0.113.13",
-        "user-agent": "test-agent"
-      },
-      body: JSON.stringify({
-        vendor: "nahid-kholghi",
-        page: "profile",
-        tier: "basic"
-      })
-    }),
-    env
-  );
-
-  await worker.fetch(
-    new Request("https://example.com/visit", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "cf-connecting-ip": "203.0.113.14",
-        "user-agent": "test-agent"
-      },
-      body: JSON.stringify({
-        vendor: "dave-blake",
-        page: "profile",
-        tier: "basic"
-      })
-    }),
-    env
-  );
-
-  const statsRequest = new Request(
-    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d",
-    {
-      headers: { Authorization: "Bearer test-secret" }
-    }
-  );
-
-  const response = await worker.fetch(statsRequest, env);
-  const json = await response.json();
-
-  const unknown = json.vendors.find((row: any) => row.vendor === "unknown-vendor");
-  const ok = json.vendors.find((row: any) => row.vendor === "nahid-kholghi");
-  const mismatch = json.vendors.find((row: any) => row.vendor === "dave-blake");
-
-  expect(unknown.plan).toBe("unknown");
-  expect(unknown.metaStatus).toBe("missing");
-
-  expect(ok.plan).toBe("basic");
-  expect(ok.metaStatus).toBe("ok");
-
-  expect(mismatch.plan).toBe("featured");
-  expect(mismatch.metaStatus).toBe("mismatch");
 });

@@ -102,7 +102,7 @@ paths:
             X-Data-Source:
               schema:
                 type: string
-                enum: [ae, kv, cache]
+                enum: [ae, cache]
             X-Data-Warning:
               schema:
                 type: string
@@ -143,7 +143,7 @@ paths:
             X-Data-Source:
               schema:
                 type: string
-                enum: [ae, kv, cache]
+                enum: [ae, cache]
             X-Data-Warning:
               schema:
                 type: string
@@ -192,7 +192,7 @@ components:
       properties:
         dataSource:
           type: string
-          enum: [ae, kv, cache]
+          enum: [ae, cache]
         dataWarning:
           type: string
     HealthResponse:

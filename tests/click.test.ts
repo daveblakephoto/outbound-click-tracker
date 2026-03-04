@@ -1,9 +1,5 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from "vitest";
-import { Miniflare } from "miniflare";
+import { expect, test } from "vitest";
 import worker from "../src/worker";
-
-let mf: Miniflare;
-let CLICKS: any;
 
 const makePostRequest = (
   bodyOverrides: Record<string, unknown> = {},
@@ -25,38 +21,39 @@ const makePostRequest = (
     })
   });
 
-beforeAll(async () => {
-  mf = new Miniflare({
-    modules: true,
-    script: "export default { fetch() { return new Response('ok'); } }",
-    kvNamespaces: ["CLICKS"]
-  });
-
-  CLICKS = await mf.getKVNamespace("CLICKS");
-});
-
-beforeEach(async () => {
-  const list = await CLICKS.list();
-  await Promise.all(list.keys.map(key => CLICKS.delete(key.name)));
-});
-
-afterAll(async () => {
-  await mf.dispose();
-});
-
-test("POST click increments counts", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  const env = { CLICKS, CLICK_SIGNING_SECRET: "secret" } as any;
+test("POST click writes Analytics Engine event", async () => {
+  const writes: any[] = [];
+  const env = {
+    CLICK_SIGNING_SECRET: "secret",
+    ANALYTICS_ENGINE: {
+      writeDataPoint(point: any) {
+        writes.push(point);
+      }
+    }
+  } as any;
 
   const response = await worker.fetch(makePostRequest(), env);
 
   expect(response.status).toBe(204);
-  expect(await CLICKS.get(`test-vendor:website:${today}`)).toBe("1");
+  expect(writes.length).toBe(1);
+  expect(writes[0].blobs[0]).toBe("click");
+  expect(writes[0].blobs[2]).toBe("test-vendor");
+  expect(writes[0].blobs[6]).toBe("website");
+});
+
+test("POST click fails when Analytics Engine binding is missing", async () => {
+  const env = { CLICK_SIGNING_SECRET: "secret" } as any;
+
+  const response = await worker.fetch(makePostRequest(), env);
+  expect(response.status).toBe(503);
 });
 
 test("POST click includes CORS headers", async () => {
   const origin = "https://startmyloveengine.com";
-  const env = { CLICKS, CLICK_SIGNING_SECRET: "secret" } as any;
+  const env = {
+    CLICK_SIGNING_SECRET: "secret",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
+  } as any;
 
   const response = await worker.fetch(
     makePostRequest({}, { Origin: origin }),
@@ -69,7 +66,10 @@ test("POST click includes CORS headers", async () => {
 });
 
 test("POST click rejects missing parameters", async () => {
-  const env = { CLICKS, CLICK_SIGNING_SECRET: "secret" } as any;
+  const env = {
+    CLICK_SIGNING_SECRET: "secret",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
+  } as any;
   const request = new Request("https://example.com/click", {
     method: "POST",
     headers: {
@@ -85,7 +85,10 @@ test("POST click rejects missing parameters", async () => {
 });
 
 test("POST click rejects invalid vendor slugs", async () => {
-  const env = { CLICKS, CLICK_SIGNING_SECRET: "secret" } as any;
+  const env = {
+    CLICK_SIGNING_SECRET: "secret",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
+  } as any;
 
   const response = await worker.fetch(
     makePostRequest({ vendor: "Bad_Vendor" }),
@@ -96,7 +99,10 @@ test("POST click rejects invalid vendor slugs", async () => {
 });
 
 test("POST click rejects invalid click types", async () => {
-  const env = { CLICKS, CLICK_SIGNING_SECRET: "secret" } as any;
+  const env = {
+    CLICK_SIGNING_SECRET: "secret",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
+  } as any;
 
   const response = await worker.fetch(
     makePostRequest({ type: "twitter" }),
@@ -107,7 +113,10 @@ test("POST click rejects invalid click types", async () => {
 });
 
 test("POST click rejects invalid origin", async () => {
-  const env = { CLICKS, CLICK_SIGNING_SECRET: "secret" } as any;
+  const env = {
+    CLICK_SIGNING_SECRET: "secret",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
+  } as any;
 
   const response = await worker.fetch(
     makePostRequest(
@@ -124,7 +133,10 @@ test("POST click rejects invalid origin", async () => {
 });
 
 test("POST click rejects missing referrer", async () => {
-  const env = { CLICKS, CLICK_SIGNING_SECRET: "secret" } as any;
+  const env = {
+    CLICK_SIGNING_SECRET: "secret",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
+  } as any;
 
   const request = new Request("https://example.com/click", {
     method: "POST",
@@ -149,8 +161,7 @@ test("GET click is disabled", async () => {
     { method: "GET" }
   );
 
-  const env = { CLICKS } as any;
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, {} as any);
   const json = await response.json();
 
   expect(response.status).toBe(410);
@@ -162,8 +173,7 @@ test("rejects non-POST/OPTIONS requests", async () => {
     method: "PUT"
   });
 
-  const env = { CLICKS } as any;
-  const response = await worker.fetch(request, env);
+  const response = await worker.fetch(request, {} as any);
 
   expect(response.status).toBe(405);
 });
