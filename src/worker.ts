@@ -666,6 +666,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     string,
     { city: string; agencySlug: string; pageType: string }
   > = {};
+  const vendorByAgencySlug: Record<string, string> = {};
   const refAgg: Record<
     string,
     { internal: Record<string, number>; external: Record<string, number> }
@@ -706,6 +707,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const sourceEnvironmentByType: Record<string, Record<string, number>> = {};
   const referralAttemptByAgency: Record<string, number> = {};
   const referralSuccessByAgency: Record<string, number> = {};
+  const agencyModelContactClickByVendor: Record<string, number> = {};
   const eventErrorsByType: Record<string, number> = {};
   const eventErrorsByClass: Record<string, number> = {};
   const eventErrorsByField: Record<string, number> = {};
@@ -715,6 +717,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const leadSessionByType: Record<string, Set<string>> = {};
   const referralAttemptSessionByAgency: Record<string, Set<string>> = {};
   const referralSuccessSessionByAgency: Record<string, Set<string>> = {};
+  const agencyModelContactClickSessionByVendor: Record<string, Set<string>> = {};
   const eventSessionDailyByName: Record<string, Record<string, Set<string>>> = {};
   const eventSessionTotal = new Set<string>();
   const sessionAttribution: Record<
@@ -1030,6 +1033,10 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     if (agencySlug && !vendorContext[vendor].agencySlug) {
       vendorContext[vendor].agencySlug = agencySlug;
     }
+    const normalizedAgencySlug = toMetricValue(agencySlug);
+    if (normalizedAgencySlug && !vendorByAgencySlug[normalizedAgencySlug]) {
+      vendorByAgencySlug[normalizedAgencySlug] = vendor;
+    }
     if (pageType && !vendorContext[vendor].pageType) {
       vendorContext[vendor].pageType = pageType;
     }
@@ -1199,6 +1206,20 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       referralSource,
       representation
     });
+    const ctaToPath = normalizePathMetric(
+      custom.to_path ??
+        custom.toPath ??
+        custom.target_path ??
+        custom.targetPath
+    );
+    const eventAgencySlug = toMetricValue(custom.agency_slug ?? custom.agencySlug);
+    const eventVendor =
+      toMetricValue(
+        custom.vendor ??
+          custom.agency_code ??
+          custom.agencyCode ??
+          custom.agency
+      ) || (eventAgencySlug ? vendorByAgencySlug[eventAgencySlug] || "" : "");
     const accessOutcome = toMetricValue(custom.access_outcome ?? custom.accessOutcome);
     const errorType = toMetricValue(custom.error_type ?? custom.errorType);
     const fieldName = toMetricValue(custom.field_name ?? custom.fieldName);
@@ -1269,6 +1290,9 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     ) {
       addMetric(referralSuccessByAgency, referralAgency || "unknown", count);
     }
+    if (eventName === "db_agency_rates_cta_click" && ctaToPath === "/models/contact") {
+      addMetric(agencyModelContactClickByVendor, eventVendor, count);
+    }
 
     if (sessionId) {
       eventSessionTotal.add(sessionId);
@@ -1293,6 +1317,13 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         addSessionMetric(
           referralSuccessSessionByAgency,
           referralAgency || "unknown",
+          sessionId
+        );
+      }
+      if (eventName === "db_agency_rates_cta_click" && ctaToPath === "/models/contact") {
+        addSessionMetric(
+          agencyModelContactClickSessionByVendor,
+          eventVendor,
           sessionId
         );
       }
@@ -1504,6 +1535,12 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     const pagesBreakdown = Object.entries(pages)
       .sort((a, b) => b[1] - a[1])
       .map(([page, count]) => ({ page, count }));
+    const views = viewAgg[vendor] || 0;
+    const uniqueViews = uniqueAgg[vendor] || 0;
+    const outboundClicks = clickCounts.website + clickCounts.instagram;
+    const modelContactClicks = agencyModelContactClickByVendor[vendor] || 0;
+    const modelContactClickSessions =
+      agencyModelContactClickSessionByVendor[vendor]?.size || 0;
 
     return {
       vendor,
@@ -1516,8 +1553,15 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       metaStatus,
       website: clickCounts.website,
       instagram: clickCounts.instagram,
-      views: viewAgg[vendor] || 0,
-      uniqueViews: uniqueAgg[vendor] || 0,
+      outboundClicks,
+      modelContactClicks,
+      modelContactClickSessions,
+      modelContactCtr: views > 0 ? (modelContactClicks / views) * 100 : 0,
+      modelContactSessionCtr:
+        uniqueViews > 0 ? (modelContactClickSessions / uniqueViews) * 100 : 0,
+      outboundLeakageRate: views > 0 ? (outboundClicks / views) * 100 : 0,
+      views,
+      uniqueViews,
       pages: pagesBreakdown,
       referrers: {
         internal: topInternal,

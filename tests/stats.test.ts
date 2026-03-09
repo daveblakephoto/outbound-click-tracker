@@ -382,6 +382,105 @@ test("includes event funnel breakdown when event rows exist", async () => {
   ).toBe(true);
 });
 
+test("includes agency vendor contact click-through metrics", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (_url, init) => {
+      const sql = String(init?.body || "");
+      if (sql.includes("blob1 = 'event'")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                vendor: "dave-blake",
+                page: "agency-rates",
+                event_type: "click",
+                event_name: "db_agency_rates_cta_click",
+                date: today,
+                event_context: JSON.stringify({
+                  custom: {
+                    funnel_step: "agency_rates_cta_click",
+                    to_path: "/models/contact/",
+                    vendor: "viviens",
+                    agency_slug: "viviens-brisbane",
+                    session_id: "sess_agency_1"
+                  }
+                }),
+                count: 3
+              },
+              {
+                vendor: "dave-blake",
+                page: "agency-rates",
+                event_type: "click",
+                event_name: "db_agency_rates_cta_click",
+                date: today,
+                event_context: JSON.stringify({
+                  custom: {
+                    funnel_step: "agency_rates_cta_click",
+                    to_path: "/contact/",
+                    vendor: "viviens",
+                    agency_slug: "viviens-brisbane",
+                    session_id: "sess_agency_2"
+                  }
+                }),
+                count: 2
+              }
+            ]
+          })
+        } as any;
+      }
+      if (sql.includes("blob1 = 'view'") && sql.includes("GROUP BY vendor, page")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                vendor: "viviens",
+                page: "agency-rates",
+                plan_observed: "featured",
+                legacy_tier: "",
+                city: "brisbane",
+                agency_slug: "viviens-brisbane",
+                page_type: "agency-rates",
+                count: 10
+              }
+            ]
+          })
+        } as any;
+      }
+      if (sql.includes("blob1 = 'view'") && sql.includes("GROUP BY date")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [{ date: today, count: 10 }] })
+        } as any;
+      }
+      if (sql.includes("blob1 = 'unique_view'")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [{ vendor: "viviens", date: today, count: 8 }] })
+        } as any;
+      }
+      return {
+        ok: true,
+        json: async () => ({ data: [] })
+      } as any;
+    }
+  );
+
+  const response = await worker.fetch(makeRequest(), makeEnv());
+  fetchSpy.mockRestore();
+
+  expect(response.status).toBe(200);
+  const json = await response.json();
+  const vendor = json.vendors.find((row: any) => row.vendor === "viviens");
+  expect(vendor).toBeTruthy();
+  expect(vendor.views).toBe(10);
+  expect(vendor.modelContactClicks).toBe(3);
+  expect(vendor.modelContactCtr).toBe(30);
+  expect(vendor.outboundLeakageRate).toBe(0);
+});
+
 test("clamps unique views to total views", async () => {
   const today = new Date().toISOString().slice(0, 10);
   const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
