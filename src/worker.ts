@@ -199,7 +199,18 @@ const parseSiteSlug = (value: unknown) => {
 };
 
 const inferSiteEnvironment = (site: string) => {
-  const normalized = parseSiteSlug(site);
+  const raw = String(site || "")
+    .trim()
+    .toLowerCase();
+  if (
+    raw === "127.0.0.1" ||
+    raw === "0.0.0.0" ||
+    raw === "::1" ||
+    raw === "[::1]"
+  ) {
+    return "local";
+  }
+  const normalized = parseSiteSlug(raw);
   if (!normalized) return "unknown";
   if (normalized === "localhost" || normalized.endsWith(".localhost")) {
     return "local";

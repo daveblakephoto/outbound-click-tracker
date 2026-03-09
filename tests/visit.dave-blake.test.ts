@@ -96,6 +96,36 @@ test("records localhost source context and mobile device class", async () => {
   expect(viewContext.platform).toBe("ios");
 });
 
+test("classifies loopback IP source host as local", async () => {
+  const analyticsWrites: any[] = [];
+  const payload = {
+    site: "dave-blake.com",
+    vendor: "dave-blake",
+    page: "agency-rates",
+    page_type: "agency-rates",
+    url: "http://127.0.0.1:4321/models/agency-rates/?agency=VIVBNE26"
+  };
+
+  const request = new Request("https://example.com/visit", {
+    method: "POST",
+    headers: {
+      Origin: "http://127.0.0.1:4321",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.21",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const response = await worker.fetch(request, makeEnv(analyticsWrites));
+
+  expect(response.status).toBe(204);
+  const viewEvent = analyticsWrites.find(point => point?.blobs?.[0] === "view");
+  expect(viewEvent).toBeTruthy();
+  expect(viewEvent.blobs[15]).toBe("127.0.0.1");
+  expect(viewEvent.blobs[16]).toBe("local");
+});
+
 test("payload referrer empty does not fall back to request Referer header", async () => {
   const analyticsWrites: any[] = [];
   const payload = {
