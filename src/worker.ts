@@ -198,6 +198,48 @@ const parseSiteSlug = (value: unknown) => {
   return normalized;
 };
 
+const inferSiteEnvironment = (site: string) => {
+  const normalized = parseSiteSlug(site);
+  if (!normalized) return "unknown";
+  if (normalized === "localhost" || normalized.endsWith(".localhost")) {
+    return "local";
+  }
+  if (
+    normalized.endsWith(".local") ||
+    normalized.includes(".local.") ||
+    normalized.startsWith("local.")
+  ) {
+    return "local";
+  }
+  if (
+    normalized.startsWith("staging.") ||
+    normalized.includes(".staging.") ||
+    normalized.endsWith(".staging") ||
+    normalized.startsWith("stg.") ||
+    normalized.includes(".stg.")
+  ) {
+    return "staging";
+  }
+  if (
+    normalized.startsWith("preview.") ||
+    normalized.includes(".preview.") ||
+    normalized.includes(".pr-")
+  ) {
+    return "preview";
+  }
+  if (
+    normalized.startsWith("dev.") ||
+    normalized.includes(".dev.") ||
+    normalized.startsWith("test.") ||
+    normalized.includes(".test.") ||
+    normalized.startsWith("qa.") ||
+    normalized.includes(".qa.")
+  ) {
+    return "development";
+  }
+  return "production";
+};
+
 let siteConfigCache: {
   rawMap: string;
   rawAllowlist: string;
@@ -384,6 +426,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   site,
   range,
   dates,
+  requestHost,
   statsTimingEnabled,
   statsRay,
   cacheControl,
@@ -394,6 +437,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   site: string;
   range: string;
   dates: string[];
+  requestHost?: string;
   statsTimingEnabled: boolean;
   statsRay?: string | null;
   cacheControl?: string;
@@ -403,6 +447,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const datasetIdent = getAnalyticsDatasetIdentifier(env);
   const startDate = dates[0];
   const endDate = dates[dates.length - 1];
+  const siteEnvironment = inferSiteEnvironment(site);
+  const endpointHost = normalizeHostname(requestHost || "");
   const baseWhere = `WHERE blob2 = ${sqlString(site)} AND blob11 >= ${sqlString(
     startDate
   )} AND blob11 <= ${sqlString(endDate)}`;
@@ -510,6 +556,11 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const eventByAccessOutcome: Record<string, number> = {};
   const eventErrorsByType: Record<string, number> = {};
   const eventErrorsByField: Record<string, number> = {};
+  const eventSessionByName: Record<string, Set<string>> = {};
+  const eventSessionByFunnelStep: Record<string, Set<string>> = {};
+  const eventSessionByAccessOutcome: Record<string, Set<string>> = {};
+  const eventSessionDailyByName: Record<string, Record<string, Set<string>>> = {};
+  const eventSessionTotal = new Set<string>();
 
   const toMetricValue = (value: unknown) => {
     const normalized = String(value || "")
@@ -522,6 +573,41 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const addMetric = (target: Record<string, number>, key: string, count: number) => {
     if (!key || !count) return;
     target[key] = (target[key] || 0) + count;
+  };
+
+  const addSessionMetric = (
+    target: Record<string, Set<string>>,
+    key: string,
+    sessionId: string
+  ) => {
+    if (!key || !sessionId) return;
+    if (!target[key]) {
+      target[key] = new Set<string>();
+    }
+    target[key].add(sessionId);
+  };
+
+  const addSessionDailyMetric = (
+    target: Record<string, Record<string, Set<string>>>,
+    key: string,
+    date: string,
+    sessionId: string
+  ) => {
+    if (!key || !date || !sessionId) return;
+    if (!target[key]) {
+      target[key] = {};
+    }
+    if (!target[key][date]) {
+      target[key][date] = new Set<string>();
+    }
+    target[key][date].add(sessionId);
+  };
+
+  const toSessionId = (value: unknown) => {
+    const candidate = String(value || "").trim();
+    if (!candidate || candidate.length > 128) return "";
+    if (!SESSION_ID_REGEX.test(candidate)) return "";
+    return candidate;
   };
 
   const readEventCustomContext = (rawContext: unknown) => {
@@ -689,6 +775,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     }
 
     const custom = readEventCustomContext(row.event_context);
+    const sessionId = toSessionId(custom.session_id ?? custom.sessionId);
     const funnelStep = toMetricValue(custom.funnel_step ?? custom.funnelStep);
     const nextStep = toMetricValue(custom.next_step ?? custom.nextStep);
     const sourcePath = toMetricValue(custom.source_path ?? custom.sourcePath);
@@ -706,12 +793,28 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     addMetric(eventByAccessOutcome, accessOutcome, count);
     addMetric(eventErrorsByType, errorType, count);
     addMetric(eventErrorsByField, fieldName, count);
+
+    if (sessionId) {
+      eventSessionTotal.add(sessionId);
+      addSessionMetric(eventSessionByName, eventName, sessionId);
+      addSessionMetric(eventSessionByFunnelStep, funnelStep, sessionId);
+      addSessionMetric(eventSessionByAccessOutcome, accessOutcome, sessionId);
+      addSessionDailyMetric(eventSessionDailyByName, eventName, date, sessionId);
+    }
   }
 
   const toBreakdown = (source: Record<string, number>, key: string) =>
     Object.entries(source)
       .sort((a, b) => b[1] - a[1])
       .map(([value, count]) => ({ [key]: value, count }));
+
+  const toSessionBreakdown = (
+    source: Record<string, Set<string>>,
+    key: string
+  ) =>
+    Object.entries(source)
+      .map(([value, sessions]) => ({ [key]: value, sessions: sessions.size }))
+      .sort((a, b) => b.sessions - a.sessions);
 
   const eventDailyByNameRows = Object.entries(eventDailyByName).flatMap(
     ([eventName, byDate]) =>
@@ -722,6 +825,16 @@ const buildStatsResponseFromAnalyticsEngine = async ({
           count: byDate[date] || 0
         }))
         .filter(entry => entry.count > 0)
+  );
+  const eventSessionDailyByNameRows = Object.entries(eventSessionDailyByName).flatMap(
+    ([eventName, byDate]) =>
+      dates
+        .map(date => ({
+          date,
+          eventName,
+          sessions: byDate[date]?.size || 0
+        }))
+        .filter(entry => entry.sessions > 0)
   );
 
   const vendorsSet = new Set([
@@ -830,6 +943,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
 
   const payload: Record<string, unknown> = {
     site,
+    environment: siteEnvironment,
+    endpointHost,
     range,
     contractVersion: CONTRACT_VERSION,
     generatedAt: new Date().toISOString(),
@@ -857,7 +972,17 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         date,
         total: eventDailyTotals[date] || 0
       })),
-      dailyByName: eventDailyByNameRows
+      dailyByName: eventDailyByNameRows,
+      sessions: {
+        total: eventSessionTotal.size,
+        byName: toSessionBreakdown(eventSessionByName, "eventName"),
+        byFunnelStep: toSessionBreakdown(eventSessionByFunnelStep, "funnelStep"),
+        byAccessOutcome: toSessionBreakdown(
+          eventSessionByAccessOutcome,
+          "accessOutcome"
+        ),
+        dailyByName: eventSessionDailyByNameRows
+      }
     }
   };
   if (dataSource) {
@@ -2874,6 +2999,7 @@ export default {
           site,
           range,
           dates,
+          requestHost: url.hostname,
           statsTimingEnabled,
           statsRay,
           cacheControl,
