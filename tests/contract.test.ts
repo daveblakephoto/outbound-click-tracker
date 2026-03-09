@@ -9,9 +9,11 @@ test("/schema exposes contract fields", async () => {
   expect(res.status).toBe(200);
   expect(res.headers.get("Content-Type")).toContain("application/json");
   const json = await res.json();
-  expect(json.apiVersion).toBe("1.0.0");
+  expect(json.apiVersion).toBe("1.1.0");
   expect(json.allowedPages).toContain("profile");
+  expect(json.allowedEventTypes).toContain("submit");
   expect(json.resolved.vendorSlugRegex).toBe("^[a-z0-9-]+$");
+  expect(json.resolved.eventNameRegex).toBe("^[a-z0-9][a-z0-9_.-]{0,63}$");
   expect(json.responses.stats.dataSource).toContain("cache");
   expect(json.responses.stats.dataSource).not.toContain("kv");
   expect(json.responses.stats.dataWarning).toBe("string");
@@ -103,6 +105,7 @@ test("/openapi returns yaml content", async () => {
   expect(res.status).toBe(200);
   expect(res.headers.get("Content-Type")).toContain("text/yaml");
   const text = await res.text();
+  expect(text).toContain("/event:");
   expect(text).toContain("/visit:");
   expect(text).toContain("StartMyLoveEngine Analytics API");
   expect(text).toContain("/api/health/analytics-engine");

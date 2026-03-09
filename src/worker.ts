@@ -14,6 +14,9 @@ const CONTRACT = contractJson as {
   allowedPlans: string[];
   allowedPlacements: string[];
   allowedClickTypes: string[];
+  allowedEventTypes?: string[];
+  eventNameRegex?: string;
+  sessionIdRegex?: string;
   internalDomains: string[];
   vendorSlugRegex: string;
   defaultRanges: string[];
@@ -31,7 +34,8 @@ const ANALYTICS_EVENT_TYPES = {
   VIEW: "view",
   UNIQUE_VIEW: "unique_view",
   PLACEMENT_VIEW: "placement_view",
-  REFERRER: "referrer"
+  REFERRER: "referrer",
+  EVENT: "event"
 } as const;
 
 type AnalyticsEventType =
@@ -914,6 +918,11 @@ const ALLOWED_PLACEMENTS = new Set(
 const ALLOWED_CLICK_TYPES = new Set(
   (CONTRACT.allowedClickTypes || []).map(value => value.trim().toLowerCase())
 );
+const ALLOWED_EVENT_TYPES = new Set(
+  (CONTRACT.allowedEventTypes || ["view", "click", "submit", "error", "custom"]).map(
+    value => value.trim().toLowerCase()
+  )
+);
 const DEFAULT_PAGE_ALLOWLIST = ALLOWED_PAGES;
 const TIER_ALLOWLIST = new Set([
   ...ALLOWED_PLANS,
@@ -922,6 +931,12 @@ const TIER_ALLOWLIST = new Set([
 const VENDOR_SLUG_REGEX = CONTRACT.vendorSlugRegex
   ? new RegExp(CONTRACT.vendorSlugRegex)
   : /^[a-z0-9-]+$/;
+const EVENT_NAME_REGEX = CONTRACT.eventNameRegex
+  ? new RegExp(CONTRACT.eventNameRegex)
+  : /^[a-z0-9][a-z0-9_.-]{0,63}$/;
+const SESSION_ID_REGEX = CONTRACT.sessionIdRegex
+  ? new RegExp(CONTRACT.sessionIdRegex)
+  : /^[A-Za-z0-9._:-]{6,128}$/;
 const INTERNAL_REFERRER_DOMAINS = new Set(
   (CONTRACT.internalDomains || []).map(value => value.toLowerCase())
 );
@@ -962,7 +977,8 @@ const CACHE_STATUS_HEADER = "X-Cache";
 const DEFAULT_RATE_LIMIT_PER_MINUTE = 60;
 const RATE_LIMIT_PREFIX = {
   VISIT: "visit",
-  CLICK: "click"
+  CLICK: "click",
+  EVENT: "event"
 };
 const parseRangeDays = (range: string) => {
   const match = /^(\d+)d$/.exec(range);
@@ -1520,6 +1536,145 @@ const getVisitAllowlists = env => {
   };
 };
 
+const getEventAllowlists = env => {
+  const toNormalizedSet = (set: Set<string> | null) => {
+    if (!set || set.size === 0) return null;
+    return new Set(Array.from(set).map(value => normalizePlanValue(value)).filter(Boolean));
+  };
+
+  const pageAllowlist = env ? toNormalizedSet(getAllowlist(env.EVENT_PAGE_ALLOWLIST)) : null;
+  const eventNameAllowlist = env
+    ? toNormalizedSet(getAllowlist(env.EVENT_NAME_ALLOWLIST))
+    : null;
+
+  return {
+    pageAllowlist,
+    eventNameAllowlist,
+    eventTypeAllowlist: ALLOWED_EVENT_TYPES
+  };
+};
+
+const validateEventPayload = (input, allowlists) => {
+  const safeSiteRaw =
+    typeof input?.site === "string" ? input.site.trim() : "";
+  const safeSite = safeSiteRaw ? parseSiteSlug(safeSiteRaw) : "";
+  const safeVendorRaw =
+    typeof input?.vendor === "string" ? input.vendor.trim() : "";
+  const safeVendor = normalizePlanValue(safeVendorRaw);
+  const safePageRaw =
+    typeof input?.page === "string" ? input.page.trim() : "";
+  const safePage = normalizePlanValue(safePageRaw);
+  const safeEventNameRaw =
+    typeof input?.event_name === "string"
+      ? input.event_name
+      : typeof input?.eventName === "string"
+        ? input.eventName
+        : "";
+  const safeEventName = normalizePlanValue(safeEventNameRaw.trim());
+  const safeEventTypeRaw =
+    typeof input?.event_type === "string"
+      ? input.event_type
+      : typeof input?.eventType === "string"
+        ? input.eventType
+        : "";
+  const safeEventType = normalizePlanValue(safeEventTypeRaw.trim());
+  const safeSessionIdRaw =
+    typeof input?.session_id === "string"
+      ? input.session_id
+      : typeof input?.sessionId === "string"
+        ? input.sessionId
+        : "";
+  const safeSessionId = safeSessionIdRaw.trim();
+  const safeSchemaVersionRaw =
+    typeof input?.event_schema_version === "string"
+      ? input.event_schema_version
+      : typeof input?.eventSchemaVersion === "string"
+        ? input.eventSchemaVersion
+        : "";
+  const safeSchemaVersion = safeSchemaVersionRaw.trim();
+  const safeCity =
+    typeof input?.city === "string" ? input.city.trim().toLowerCase() : "";
+  const safeAgencySlugRaw =
+    typeof input?.agency_slug === "string"
+      ? input.agency_slug
+      : typeof input?.agencySlug === "string"
+        ? input.agencySlug
+        : "";
+  const safeAgencySlug = safeAgencySlugRaw.trim().toLowerCase();
+  const safePageTypeRaw =
+    typeof input?.page_type === "string"
+      ? input.page_type
+      : typeof input?.pageType === "string"
+        ? input.pageType
+        : "";
+  const safePageType = safePageTypeRaw.trim().toLowerCase();
+
+  if (!safeEventName || !safeEventType || !safePage || !safeSessionId) {
+    return { ok: false, error: "Missing parameters" };
+  }
+
+  if (
+    (safeSiteRaw && !safeSite) ||
+    safeEventName.length > 64 ||
+    safeEventType.length > 32 ||
+    safePage.length > 64 ||
+    safeSessionId.length > 128 ||
+    (safeSchemaVersion && safeSchemaVersion.length > 32) ||
+    (safeVendor && safeVendor.length > 64) ||
+    (safeCity && safeCity.length > 64) ||
+    (safeAgencySlug && safeAgencySlug.length > 64) ||
+    (safePageType && safePageType.length > 64)
+  ) {
+    return { ok: false, error: "Invalid parameters" };
+  }
+
+  if (!isSafeSlug(safePage) || !EVENT_NAME_REGEX.test(safeEventName)) {
+    return { ok: false, error: "Invalid parameters" };
+  }
+  if (!SESSION_ID_REGEX.test(safeSessionId)) {
+    return { ok: false, error: "Invalid session_id" };
+  }
+  if (safeVendor && !isSafeSlug(safeVendor)) {
+    return { ok: false, error: "Invalid parameters" };
+  }
+  if (safeCity && !isSafeSlug(safeCity)) {
+    return { ok: false, error: "Invalid parameters" };
+  }
+  if (safeAgencySlug && !isSafeSlug(safeAgencySlug)) {
+    return { ok: false, error: "Invalid parameters" };
+  }
+  if (safePageType && !isSafeSlug(safePageType)) {
+    return { ok: false, error: "Invalid parameters" };
+  }
+
+  if (!allowlists.eventTypeAllowlist.has(safeEventType)) {
+    return { ok: false, error: "Invalid event_type" };
+  }
+  if (allowlists.pageAllowlist && !allowlists.pageAllowlist.has(safePage)) {
+    return { ok: false, error: "Invalid page" };
+  }
+  if (
+    allowlists.eventNameAllowlist &&
+    !allowlists.eventNameAllowlist.has(safeEventName)
+  ) {
+    return { ok: false, error: "Invalid event_name" };
+  }
+
+  return {
+    ok: true,
+    site: safeSite,
+    vendor: safeVendor || "unknown",
+    page: safePage,
+    eventName: safeEventName,
+    eventType: safeEventType,
+    sessionId: safeSessionId,
+    schemaVersion: safeSchemaVersion || "event_v1",
+    city: safeCity,
+    agencySlug: safeAgencySlug,
+    pageType: safePageType
+  };
+};
+
 const validateVisitPayload = (input, allowlists) => {
   const safeSiteRaw =
     typeof input?.site === "string" ? input.site.trim() : "";
@@ -1894,6 +2049,194 @@ export default {
     }
 
     /* ----------------------------
+       GENERIC EVENT TRACKING (PUBLIC)
+       ---------------------------- */
+    if (url.pathname === "/event") {
+      const corsHeaders = getVisitCorsHeaders(request);
+
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", {
+          status: 405,
+          headers: { Allow: "POST", ...corsHeaders }
+        });
+      }
+
+      const rateLimitResponse = await enforceRateLimit(
+        env,
+        request,
+        RATE_LIMIT_PREFIX.EVENT,
+        corsHeaders
+      );
+      if (rateLimitResponse) return rateLimitResponse;
+
+      if (!hasAnalyticsWriter(env)) {
+        return new Response("Analytics engine unavailable", {
+          status: 503,
+          headers: corsHeaders
+        });
+      }
+
+      let payload;
+      try {
+        payload = await request.json();
+      } catch {
+        return new Response("Invalid JSON", {
+          status: 400,
+          headers: corsHeaders
+        });
+      }
+
+      if (!payload || typeof payload !== "object") {
+        return new Response("Invalid payload", {
+          status: 400,
+          headers: corsHeaders
+        });
+      }
+
+      const allowlists = getEventAllowlists(env);
+      const validation = validateEventPayload(payload, allowlists);
+      if (!validation.ok) {
+        return new Response(validation.error, {
+          status: 400,
+          headers: corsHeaders
+        });
+      }
+
+      const analyticsSite = resolveAnalyticsSite(
+        env,
+        request,
+        validation.site || undefined
+      );
+      if (!analyticsSite) {
+        return new Response("Unknown site", {
+          status: 400,
+          headers: corsHeaders
+        });
+      }
+
+      const sourceUrl = getSafeUrl(payload.url);
+      const sourceHost = getSourceHostFromUrl(sourceUrl);
+      const sourcePath = sourceUrl?.pathname || "";
+      const sourceQuery = sourceUrl?.search ? sourceUrl.search.slice(1) : "";
+      const userAgent = request.headers.get("user-agent") || "";
+      const deviceClass = classifyDeviceClass(userAgent);
+      const platform = classifyUserPlatform(userAgent);
+
+      const hasPayloadReferrer =
+        Object.prototype.hasOwnProperty.call(payload, "referrer") &&
+        typeof payload.referrer === "string";
+      const referrer = hasPayloadReferrer
+        ? payload.referrer
+        : request.headers.get("referer") || "";
+      let refScope: "int" | "ext" | "" = "";
+      let refBucket = "";
+      let refChannel = "direct";
+      let referrerDomain = "";
+      const explicitRefChannel =
+        typeof payload.ref_channel === "string"
+          ? payload.ref_channel.trim().toLowerCase()
+          : typeof payload.refChannel === "string"
+            ? payload.refChannel.trim().toLowerCase()
+            : "";
+
+      if (referrer && referrer.length <= MAX_REFERRER_LENGTH) {
+        let refUrl;
+        try {
+          refUrl = new URL(referrer);
+        } catch {
+          refUrl = null;
+        }
+
+        if (refUrl) {
+          const hostname = normalizeHostname(refUrl.hostname);
+          if (hostname && isSafeHostname(hostname)) {
+            referrerDomain = hostname;
+            const isInternal = Array.from(INTERNAL_REFERRER_DOMAINS).some(
+              domain => hostname === domain || hostname.endsWith(`.${domain}`)
+            );
+            if (isInternal) {
+              refScope = "int";
+              refBucket = classifyInternalReferrer(refUrl.pathname);
+            } else {
+              refScope = "ext";
+              refBucket = hostname;
+            }
+          }
+        }
+      }
+
+      refChannel = classifyRefChannel({
+        explicitRefChannel,
+        hasReferrer: Boolean(refScope),
+        isInternalReferrer: refScope === "int"
+      });
+
+      const customContext = sanitizeCustomContext(
+        payload.custom_context ??
+          payload.customContext ??
+          payload.context ??
+          payload.custom
+      );
+      const eventContext = buildEventContext({
+        sourcePath,
+        sourceQuery,
+        platform,
+        referrerDomain,
+        customContext: {
+          ...customContext,
+          event_name: validation.eventName,
+          event_type: validation.eventType,
+          session_id: validation.sessionId,
+          schema_version: validation.schemaVersion
+        }
+      });
+
+      const date = new Date().toISOString().slice(0, 10);
+      writeAnalyticsEvent(env, {
+        eventType: ANALYTICS_EVENT_TYPES.EVENT,
+        site: analyticsSite,
+        vendor: validation.vendor,
+        page: validation.page,
+        clickType: validation.eventType,
+        placement: validation.eventName,
+        city: validation.city,
+        agencySlug: validation.agencySlug,
+        pageType: validation.pageType,
+        sourceHost,
+        deviceClass,
+        refChannel,
+        eventContext,
+        date
+      });
+
+      if (refScope && refBucket) {
+        writeAnalyticsEvent(env, {
+          eventType: ANALYTICS_EVENT_TYPES.REFERRER,
+          site: analyticsSite,
+          vendor: validation.vendor,
+          page: validation.page,
+          plan: "unknown",
+          city: validation.city,
+          agencySlug: validation.agencySlug,
+          pageType: validation.pageType,
+          sourceHost,
+          deviceClass,
+          refChannel,
+          eventContext,
+          refScope,
+          refBucket,
+          date
+        });
+      }
+
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+
+    /* ----------------------------
        VISIT TRACKING (PUBLIC)
        ---------------------------- */
     if (url.pathname === "/visit") {
@@ -2195,10 +2538,13 @@ export default {
         ...CONTRACT,
         resolved: {
           vendorSlugRegex: VENDOR_SLUG_REGEX.source,
+          eventNameRegex: EVENT_NAME_REGEX.source,
+          sessionIdRegex: SESSION_ID_REGEX.source,
           allowedPages: Array.from(ALLOWED_PAGES),
           allowedPlans: Array.from(ALLOWED_PLANS),
           allowedPlacements: Array.from(ALLOWED_PLACEMENTS),
           allowedClickTypes: Array.from(ALLOWED_CLICK_TYPES),
+          allowedEventTypes: Array.from(ALLOWED_EVENT_TYPES),
           internalDomains: Array.from(INTERNAL_REFERRER_DOMAINS),
           visitAllowedOrigins: Array.from(VISIT_ALLOWED_ORIGINS),
           exportAllowedOrigins: Array.from(EXPORT_ALLOWED_ORIGINS),

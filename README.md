@@ -14,7 +14,7 @@ Fast, local, deterministic tests for a Cloudflare Workers click tracker using Vi
 ## Notes
 
 - Set `ANALYTICS_API_TOKEN` as a Wrangler secret for `/api/stats` auth.
-- Optional env vars: `CLICK_SIGNING_SECRET`, `RATE_LIMIT_PER_MINUTE`, `ANALYTICS_CACHE`, `VENDOR_ALLOWLIST`, `VISIT_PAGE_ALLOWLIST`.
+- Optional env vars: `CLICK_SIGNING_SECRET`, `RATE_LIMIT_PER_MINUTE`, `ANALYTICS_CACHE`, `VENDOR_ALLOWLIST`, `VISIT_PAGE_ALLOWLIST`, `EVENT_PAGE_ALLOWLIST`, `EVENT_NAME_ALLOWLIST`.
 - Multi-site routing: set `SITE_MAP_JSON` (hostname -> site slug) and `SITE_ALLOWLIST` (CSV) to attribute events per brand/site when using a shared Worker endpoint.
 - Abuse protection: rate limiting is enabled by default at **60 requests/minute per IP**. Set `RATE_LIMIT_PER_MINUTE=0` to disable.
 - Click signing: `POST /click` is signed **server-side only**; the worker computes an internal signature after validating origin/referrer. If the secret is missing, `POST /click` returns 503. **GET /click is deprecated and disabled (410).**
@@ -30,6 +30,9 @@ Fast, local, deterministic tests for a Cloudflare Workers click tracker using Vi
   - `GET /schema` — returns contract JSON plus resolved/normalized allowlists (cached 1h).
   - `GET /openapi` — returns OpenAPI YAML (cached 1h).
   - `GET /api/health/analytics-engine` — auth-protected AE probe (no-store).
+- Ingestion endpoints:
+  - `POST /visit` — legacy/page-view analytics payload.
+  - `POST /event` — generic event ingestion (`event_name`, `event_type`, `page`, `session_id`) for funnel telemetry.
 - Producers (startmyloveengine site) should import the contract at build time; consumers (mocha dashboard) may cache `/schema` for up to 1h.
 - Change policy: additive-only within a minor version; breaking changes require a major bump and a deprecation window.
 

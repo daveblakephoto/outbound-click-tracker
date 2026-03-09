@@ -1,0 +1,152 @@
+import { expect, test } from "vitest";
+import worker from "../src/worker";
+
+const makeEnv = (writes: any[] = [], overrides: Record<string, unknown> = {}) =>
+  ({
+    SITE_ALLOWLIST: "startmyloveengine,dave-blake.com",
+    ANALYTICS_ENGINE: {
+      writeDataPoint(point: any) {
+        writes.push(point);
+      }
+    },
+    ...overrides
+  }) as any;
+
+test("records generic event payload in analytics blobs", async () => {
+  const writes: any[] = [];
+  const request = new Request("https://example.com/event", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.44",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+    },
+    body: JSON.stringify({
+      event_schema_version: "event_v1",
+      site: "dave-blake.com",
+      vendor: "dave-blake",
+      event_name: "db_contact_form_submit_success",
+      event_type: "submit",
+      page: "models-contact",
+      session_id: "mfs_abc123456",
+      custom_context: {
+        source_path: "models-contact",
+        funnel_step: "submit_success",
+        redirected: true
+      },
+      referrer: "https://dave-blake.com/models/rates/",
+      url: "https://dave-blake.com/models/contact/?submitted=1"
+    })
+  });
+
+  const response = await worker.fetch(request, makeEnv(writes));
+  expect(response.status).toBe(204);
+
+  const eventWrite = writes.find(point => point?.blobs?.[0] === "event");
+  expect(eventWrite).toBeTruthy();
+  expect(eventWrite.blobs[1]).toBe("dave-blake.com");
+  expect(eventWrite.blobs[2]).toBe("dave-blake");
+  expect(eventWrite.blobs[3]).toBe("models-contact");
+  expect(eventWrite.blobs[6]).toBe("submit");
+  expect(eventWrite.blobs[7]).toBe("db_contact_form_submit_success");
+  expect(eventWrite.blobs[15]).toBe("dave-blake.com");
+  expect(eventWrite.blobs[17]).toBe("desktop");
+  expect(eventWrite.blobs[18]).toBe("internal");
+
+  const context = JSON.parse(eventWrite.blobs[19]);
+  expect(context.sourcePath).toBe("/models/contact/");
+  expect(context.custom.event_name).toBe("db_contact_form_submit_success");
+  expect(context.custom.event_type).toBe("submit");
+  expect(context.custom.session_id).toBe("mfs_abc123456");
+});
+
+test("returns CORS headers on /event preflight", async () => {
+  const origin = "https://dave-blake.com";
+  const request = new Request("https://example.com/event", {
+    method: "OPTIONS",
+    headers: {
+      Origin: origin,
+      "Access-Control-Request-Method": "POST"
+    }
+  });
+
+  const response = await worker.fetch(request, {} as any);
+  expect(response.status).toBe(204);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+  expect(response.headers.get("Access-Control-Allow-Methods")).toBe(
+    "POST, OPTIONS"
+  );
+});
+
+test("rejects invalid event type", async () => {
+  const request = new Request("https://example.com/event", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.45",
+      "user-agent": "test-agent"
+    },
+    body: JSON.stringify({
+      site: "dave-blake.com",
+      event_name: "db_models_page_view",
+      event_type: "purchase",
+      page: "models-index",
+      session_id: "mfs_invalid_type_123"
+    })
+  });
+
+  const response = await worker.fetch(request, makeEnv([]));
+  expect(response.status).toBe(400);
+  expect(await response.text()).toBe("Invalid event_type");
+});
+
+test("enforces optional event allowlists from env", async () => {
+  const writes: any[] = [];
+  const env = makeEnv(writes, {
+    EVENT_PAGE_ALLOWLIST: "models-contact",
+    EVENT_NAME_ALLOWLIST: "db_contact_form_submit_success"
+  });
+
+  const okRequest = new Request("https://example.com/event", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.46",
+      "user-agent": "test-agent"
+    },
+    body: JSON.stringify({
+      site: "dave-blake.com",
+      event_name: "db_contact_form_submit_success",
+      event_type: "submit",
+      page: "models-contact",
+      session_id: "mfs_allow_123456"
+    })
+  });
+
+  const badRequest = new Request("https://example.com/event", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.47",
+      "user-agent": "test-agent"
+    },
+    body: JSON.stringify({
+      site: "dave-blake.com",
+      event_name: "db_models_page_view",
+      event_type: "view",
+      page: "models-index",
+      session_id: "mfs_allow_789012"
+    })
+  });
+
+  const okResponse = await worker.fetch(okRequest, env);
+  expect(okResponse.status).toBe(204);
+
+  const badResponse = await worker.fetch(badRequest, env);
+  expect(badResponse.status).toBe(400);
+  expect(await badResponse.text()).toBe("Invalid page");
+});

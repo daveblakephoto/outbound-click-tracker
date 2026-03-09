@@ -1,5 +1,5 @@
 {
-  "apiVersion": "1.0.0",
+  "apiVersion": "1.1.0",
   "allowedPages": [
     "profile",
     "spotlight",
@@ -12,6 +12,9 @@
   "allowedPlans": ["unpaid", "basic", "featured"],
   "allowedPlacements": ["spotlight", "editor_pick", "home_feature"],
   "allowedClickTypes": ["website", "instagram"],
+  "allowedEventTypes": ["view", "click", "submit", "error", "custom"],
+  "eventNameRegex": "^[a-z0-9][a-z0-9_.-]{0,63}$",
+  "sessionIdRegex": "^[A-Za-z0-9._:-]{6,128}$",
   "internalDomains": [
     "startmyloveengine.com",
     "go.startmyloveengine.com",
@@ -44,6 +47,12 @@
     ]
   },
   "endpoints": {
+    "event": {
+      "methods": ["POST"]
+    },
+    "visit": {
+      "methods": ["POST"]
+    },
     "click": {
       "methods": ["POST"]
     }

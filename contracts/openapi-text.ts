@@ -3,7 +3,7 @@
 export const OPENAPI_YAML = `openapi: 3.1.0
 info:
   title: StartMyLoveEngine Analytics API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Contract for analytics collection and reporting.
     Change policy:
@@ -13,6 +13,59 @@ info:
 servers:
   - url: https://go.startmyloveengine.com
 paths:
+  /event:
+    options:
+      summary: Preflight for generic event ingestion
+      responses:
+        "204":
+          description: CORS preflight
+    post:
+      summary: Record a generic analytics event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event_schema_version:
+                  type: string
+                  description: schema version tag for producer payload
+                site:
+                  type: string
+                  description: explicit site slug (optional when inferred from Origin)
+                vendor:
+                  type: string
+                  description: optional grouping slug (defaults to unknown)
+                event_name:
+                  type: string
+                  description: event key (for example db_models_page_view)
+                event_type:
+                  type: string
+                  enum: [view, click, submit, error, custom]
+                page:
+                  type: string
+                  description: page slug (for example models-contact)
+                session_id:
+                  type: string
+                  description: session identifier from client
+                custom_context:
+                  type: object
+                  additionalProperties: true
+                referrer:
+                  type: string
+                url:
+                  type: string
+              required:
+                - event_name
+                - event_type
+                - page
+                - session_id
+      responses:
+        "204":
+          description: event recorded
+        "400":
+          description: validation error
   /visit:
     options:
       summary: Preflight for visit beacon
