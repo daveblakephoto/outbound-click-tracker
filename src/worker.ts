@@ -1644,6 +1644,120 @@ const VISIT_ALLOWED_ORIGINS = new Set(
 const EXPORT_ALLOWED_ORIGINS = new Set(
   (CONTRACT.cors?.exportAllowedOrigins || []).map(origin => origin.trim())
 );
+const DEFAULT_OPTIONAL_ANALYTICS_EVENTS = new Set([
+  "db_scroll_depth",
+  "db_engaged_time",
+  "db_nav_click",
+  "db_cta_impression"
+]);
+
+let optionalEventControlCache: {
+  rawEnabled: string;
+  rawAllowlist: string;
+  rawSampleRate: string;
+  parsed: {
+    enabled: boolean;
+    eventNames: Set<string>;
+    sampleRate: number;
+  };
+} | null = null;
+
+const parseBooleanEnv = (value: unknown, fallback: boolean) => {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    return fallback;
+  }
+  const parsed = parseBooleanLike(value);
+  return parsed === null ? fallback : parsed;
+};
+
+const parseSampleRate = (value: unknown, fallback = 1) => {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed <= 0) return 0;
+  if (parsed >= 1) return 1;
+  return parsed;
+};
+
+const normalizeOptionalEventNames = (raw: string) => {
+  const parsed = getAllowlist(raw);
+  if (!parsed || parsed.size === 0) {
+    return new Set(DEFAULT_OPTIONAL_ANALYTICS_EVENTS);
+  }
+  const normalized = new Set<string>();
+  for (const value of parsed) {
+    const key = normalizePlanValue(value);
+    if (!key) continue;
+    normalized.add(key);
+  }
+  if (normalized.size === 0) {
+    return new Set(DEFAULT_OPTIONAL_ANALYTICS_EVENTS);
+  }
+  return normalized;
+};
+
+const getOptionalEventControl = (env: any) => {
+  const rawEnabled =
+    typeof env?.ANALYTICS_OPTIONAL_EVENTS_ENABLED === "string"
+      ? env.ANALYTICS_OPTIONAL_EVENTS_ENABLED
+      : "";
+  const rawAllowlist =
+    typeof env?.ANALYTICS_OPTIONAL_EVENT_ALLOWLIST === "string"
+      ? env.ANALYTICS_OPTIONAL_EVENT_ALLOWLIST
+      : "";
+  const rawSampleRate =
+    typeof env?.ANALYTICS_OPTIONAL_EVENT_SAMPLE_RATE === "string"
+      ? env.ANALYTICS_OPTIONAL_EVENT_SAMPLE_RATE
+      : "";
+
+  if (
+    optionalEventControlCache &&
+    optionalEventControlCache.rawEnabled === rawEnabled &&
+    optionalEventControlCache.rawAllowlist === rawAllowlist &&
+    optionalEventControlCache.rawSampleRate === rawSampleRate
+  ) {
+    return optionalEventControlCache.parsed;
+  }
+
+  const parsed = {
+    enabled: parseBooleanEnv(rawEnabled, true),
+    eventNames: normalizeOptionalEventNames(rawAllowlist),
+    sampleRate: parseSampleRate(rawSampleRate, 1)
+  };
+  optionalEventControlCache = {
+    rawEnabled,
+    rawAllowlist,
+    rawSampleRate,
+    parsed
+  };
+  return parsed;
+};
+
+const stableHash = (value: string) => {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+};
+
+const shouldKeepOptionalEvent = ({
+  sampleRate,
+  sessionId,
+  eventName
+}: {
+  sampleRate: number;
+  sessionId: string;
+  eventName: string;
+}) => {
+  if (sampleRate >= 1) return true;
+  if (sampleRate <= 0) return false;
+  const key = `${sessionId}:${eventName}`;
+  const bucket = stableHash(key) % 10000;
+  return bucket < Math.floor(sampleRate * 10000);
+};
 
 const RANGE_DAY_MAP = (() => {
   const map = {};
@@ -1877,28 +1991,111 @@ const classifyUserPlatform = (userAgent: string) => {
 };
 
 const MAX_EVENT_CONTEXT_LENGTH = 1500;
-const MAX_CUSTOM_CONTEXT_KEYS = 20;
+const MAX_CUSTOM_CONTEXT_KEYS = 28;
+const MAX_CUSTOM_CONTEXT_VALUE_LENGTH = 240;
+const CUSTOM_CONTEXT_PRIORITY_KEYS = [
+  "funnel_step",
+  "next_step",
+  "scroll_depth_pct",
+  "scrollDepthPct",
+  "max_scroll_pct",
+  "maxScrollPct",
+  "engaged_time_seconds",
+  "engagedTimeSeconds",
+  "nav_area",
+  "navArea",
+  "pathway",
+  "timeline",
+  "field_name",
+  "fieldName",
+  "error_type",
+  "errorType",
+  "error_class",
+  "errorClass",
+  "http_status",
+  "httpStatus",
+  "session_id",
+  "sessionId",
+  "event_id",
+  "eventId",
+  "event_ts_client",
+  "eventTsClient",
+  "source_path",
+  "sourcePath",
+  "target_path",
+  "targetPath",
+  "target_domain",
+  "targetDomain",
+  "outbound_kind",
+  "outboundKind",
+  "cta_id",
+  "ctaId",
+  "cta_position",
+  "ctaPosition",
+  "cta_text",
+  "ctaText",
+  "access_outcome",
+  "accessOutcome",
+  "source_env",
+  "sourceEnv",
+  "environment",
+  "is_test_traffic",
+  "isTestTraffic",
+  "first_touch_source",
+  "firstTouchSource",
+  "last_touch_source",
+  "lastTouchSource",
+  "landing_page",
+  "utm_source",
+  "utm_medium",
+  "utm_campaign",
+  "utm_term",
+  "utm_content"
+];
 
 const sanitizeCustomContext = (value: unknown) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {};
   }
 
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([key]) => /^[a-zA-Z0-9_.-]{1,40}$/.test(key))
-    .slice(0, MAX_CUSTOM_CONTEXT_KEYS)
-    .map(([key, item]) => {
-      if (
-        typeof item === "string" ||
-        typeof item === "number" ||
-        typeof item === "boolean"
-      ) {
-        return [key, String(item)];
-      }
-      return [key, JSON.stringify(item)];
-    });
+  const entries = Object.entries(value as Record<string, unknown>).filter(([key]) =>
+    /^[a-zA-Z0-9_.-]{1,40}$/.test(key)
+  );
+  const byKey = new Map(entries);
+  const selected: Array<[string, string]> = [];
+  const selectedKeys = new Set<string>();
+  const toStringValue = (item: unknown) => {
+    const raw =
+      typeof item === "string" ||
+      typeof item === "number" ||
+      typeof item === "boolean"
+        ? String(item)
+        : JSON.stringify(item);
+    if (raw.length <= MAX_CUSTOM_CONTEXT_VALUE_LENGTH) return raw;
+    return raw.slice(0, MAX_CUSTOM_CONTEXT_VALUE_LENGTH);
+  };
+  const tryAdd = (key: string, item: unknown) => {
+    if (!key || selectedKeys.has(key) || selected.length >= MAX_CUSTOM_CONTEXT_KEYS) {
+      return;
+    }
+    selected.push([key, toStringValue(item)]);
+    selectedKeys.add(key);
+  };
 
-  return Object.fromEntries(entries);
+  for (const key of CUSTOM_CONTEXT_PRIORITY_KEYS) {
+    if (!byKey.has(key)) continue;
+    tryAdd(key, byKey.get(key));
+    if (selected.length >= MAX_CUSTOM_CONTEXT_KEYS) break;
+  }
+
+  if (selected.length < MAX_CUSTOM_CONTEXT_KEYS) {
+    for (const [key, item] of entries) {
+      tryAdd(key, item);
+      if (selected.length >= MAX_CUSTOM_CONTEXT_KEYS) break;
+    }
+  }
+
+  return Object.fromEntries(selected);
 };
 
 const buildEventContext = ({
@@ -2868,6 +3065,33 @@ export default {
           status: 400,
           headers: corsHeaders
         });
+      }
+      const optionalEventControl = getOptionalEventControl(env);
+      if (optionalEventControl.eventNames.has(validation.eventName)) {
+        if (!optionalEventControl.enabled) {
+          return new Response(null, {
+            status: 202,
+            headers: {
+              "X-Event-Skipped": "optional-disabled",
+              ...corsHeaders
+            }
+          });
+        }
+        if (
+          !shouldKeepOptionalEvent({
+            sampleRate: optionalEventControl.sampleRate,
+            sessionId: validation.sessionId,
+            eventName: validation.eventName
+          })
+        ) {
+          return new Response(null, {
+            status: 202,
+            headers: {
+              "X-Event-Skipped": "optional-sampled",
+              ...corsHeaders
+            }
+          });
+        }
       }
 
       const analyticsSite = resolveAnalyticsSite(

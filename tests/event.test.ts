@@ -101,6 +101,134 @@ test("uses top-level source_env and is_test_traffic when custom_context omits th
   expect(context.custom.is_test_traffic).toBe("true");
 });
 
+test("optional analytics events can be disabled without blocking critical events", async () => {
+  const writes: any[] = [];
+  const env = makeEnv(writes, {
+    ANALYTICS_OPTIONAL_EVENTS_ENABLED: "0"
+  });
+
+  const optionalRequest = new Request("https://example.com/event", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.49",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+    },
+    body: JSON.stringify({
+      site: "dave-blake.com",
+      vendor: "dave-blake",
+      event_name: "db_scroll_depth",
+      event_type: "custom",
+      page: "home",
+      session_id: "mfs_optional_disabled_1",
+      custom_context: {
+        scroll_depth_pct: 50
+      }
+    })
+  });
+
+  const optionalResponse = await worker.fetch(optionalRequest, env);
+  expect(optionalResponse.status).toBe(202);
+  expect(optionalResponse.headers.get("X-Event-Skipped")).toBe("optional-disabled");
+  expect(writes.filter(point => point?.blobs?.[0] === "event").length).toBe(0);
+
+  const criticalRequest = new Request("https://example.com/event", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.49",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+    },
+    body: JSON.stringify({
+      site: "dave-blake.com",
+      vendor: "dave-blake",
+      event_name: "db_contact_form_submit_success",
+      event_type: "submit",
+      page: "models-contact",
+      session_id: "mfs_optional_disabled_2"
+    })
+  });
+
+  const criticalResponse = await worker.fetch(criticalRequest, env);
+  expect(criticalResponse.status).toBe(204);
+  expect(writes.filter(point => point?.blobs?.[0] === "event").length).toBe(1);
+});
+
+test("optional analytics events support deterministic sampling", async () => {
+  const writes: any[] = [];
+  const env = makeEnv(writes, {
+    ANALYTICS_OPTIONAL_EVENTS_ENABLED: "1",
+    ANALYTICS_OPTIONAL_EVENT_SAMPLE_RATE: "0"
+  });
+  const request = new Request("https://example.com/event", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.50",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+    },
+    body: JSON.stringify({
+      site: "dave-blake.com",
+      vendor: "dave-blake",
+      event_name: "db_engaged_time",
+      event_type: "custom",
+      page: "home",
+      session_id: "mfs_optional_sample_0",
+      custom_context: {
+        engaged_time_seconds: 30
+      }
+    })
+  });
+  const response = await worker.fetch(request, env);
+  expect(response.status).toBe(202);
+  expect(response.headers.get("X-Event-Skipped")).toBe("optional-sampled");
+  expect(writes.filter(point => point?.blobs?.[0] === "event").length).toBe(0);
+});
+
+test("keeps engagement keys in custom context even when context is dense", async () => {
+  const writes: any[] = [];
+  const denseContext: Record<string, string | number> = {};
+  for (let i = 0; i < 40; i += 1) {
+    denseContext[`k_${i}`] = `v_${i}`;
+  }
+  denseContext.scroll_depth_pct = 75;
+  denseContext.engaged_time_seconds = 30;
+  denseContext.funnel_step = "scroll_depth";
+  denseContext.nav_area = "header";
+
+  const request = new Request("https://example.com/event", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.52",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+    },
+    body: JSON.stringify({
+      site: "dave-blake.com",
+      vendor: "dave-blake",
+      event_name: "db_scroll_depth",
+      event_type: "custom",
+      page: "home",
+      session_id: "mfs_dense_context_1",
+      custom_context: denseContext
+    })
+  });
+
+  const response = await worker.fetch(request, makeEnv(writes));
+  expect(response.status).toBe(204);
+  const eventWrite = writes.find(point => point?.blobs?.[0] === "event");
+  expect(eventWrite).toBeTruthy();
+  const context = JSON.parse(eventWrite.blobs[19]);
+  expect(context.custom.scroll_depth_pct).toBe("75");
+  expect(context.custom.engaged_time_seconds).toBe("30");
+  expect(context.custom.funnel_step).toBe("scroll_depth");
+  expect(context.custom.nav_area).toBe("header");
+});
+
 test("dedupes repeated event_id within dedupe window", async () => {
   const writes: any[] = [];
   const payload = {
