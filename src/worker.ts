@@ -1472,7 +1472,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     ...Object.keys(uniqueAgg),
     ...Object.keys(pageAgg),
     ...Object.keys(refAgg),
-    ...Object.keys(placementAgg)
+    ...Object.keys(placementAgg),
+    ...Object.keys(agencyModelContactClickByVendor)
   ]);
 
   const vendors = Array.from(vendorsSet).map(vendor => {
