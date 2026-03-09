@@ -1723,6 +1723,19 @@ const isAllowedClickReferrer = (referrer: string | null) => {
 const isAllowedExportOrigin = origin => {
   if (!origin) return false;
   if (EXPORT_ALLOWED_ORIGINS.has(origin)) return true;
+  try {
+    const parsed = new URL(origin);
+    const host = normalizeHostname(parsed.hostname);
+    const protocol = parsed.protocol;
+    if (
+      (protocol === "http:" || protocol === "https:") &&
+      (host === "localhost" || host === "127.0.0.1" || host === "::1")
+    ) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
   return origin.endsWith(".mocha.app");
 };
 
