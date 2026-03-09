@@ -1357,6 +1357,23 @@ const normalizeBearerToken = (value: string | null) => {
   return value.trim();
 };
 
+const isStatsAuthBypassed = (env: any) =>
+  String(env.ALLOW_UNAUTH_STATS || "").trim() === "1";
+
+const isStatsRequestAuthorized = (
+  request: Request,
+  env: any
+) => {
+  const auth = request.headers.get("Authorization");
+  if (isStatsAuthBypassed(env)) {
+    return { ok: true, auth };
+  }
+  return {
+    ok: auth === `Bearer ${env.ANALYTICS_API_TOKEN}`,
+    auth
+  };
+};
+
 const getRateLimitPerMinute = (env: any) => {
   const raw = env.RATE_LIMIT_PER_MINUTE;
   if (raw === undefined || raw === null || raw === "") {
@@ -2548,7 +2565,8 @@ export default {
           internalDomains: Array.from(INTERNAL_REFERRER_DOMAINS),
           visitAllowedOrigins: Array.from(VISIT_ALLOWED_ORIGINS),
           exportAllowedOrigins: Array.from(EXPORT_ALLOWED_ORIGINS),
-          defaultRanges: CONTRACT.defaultRanges || []
+          defaultRanges: CONTRACT.defaultRanges || [],
+          allowUnauthStatsEnabled: isStatsAuthBypassed(env)
         }
       };
 
@@ -2608,8 +2626,9 @@ export default {
         });
       }
 
-      const auth = request.headers.get("Authorization");
-      if (auth !== `Bearer ${env.ANALYTICS_API_TOKEN}`) {
+      const authCheck = isStatsRequestAuthorized(request, env);
+      const auth = authCheck.auth;
+      if (!authCheck.ok) {
         return new Response("Unauthorized", {
           status: 401,
           headers: corsHeaders
@@ -2766,8 +2785,9 @@ export default {
         });
       }
 
-      const auth = request.headers.get("Authorization");
-      if (auth !== `Bearer ${env.ANALYTICS_API_TOKEN}`) {
+      const authCheck = isStatsRequestAuthorized(request, env);
+      const auth = authCheck.auth;
+      if (!authCheck.ok) {
         return new Response("Unauthorized", { status: 401, headers: corsHeaders });
       }
 
@@ -2928,8 +2948,8 @@ export default {
         });
       }
 
-      const auth = request.headers.get("Authorization");
-      if (auth !== `Bearer ${env.ANALYTICS_API_TOKEN}`) {
+      const authCheck = isStatsRequestAuthorized(request, env);
+      if (!authCheck.ok) {
         return new Response("Unauthorized", {
           status: 401,
           headers: corsHeaders
