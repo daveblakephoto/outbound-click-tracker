@@ -135,6 +135,25 @@ test("includes event funnel breakdown when event rows exist", async () => {
           })
         } as any;
       }
+      if (sql.includes("GROUP BY source_host, record_type")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                source_host: "staging.dave-blake.com",
+                record_type: "event",
+                count: 5
+              },
+              {
+                source_host: "staging.dave-blake.com",
+                record_type: "referrer",
+                count: 2
+              }
+            ]
+          })
+        } as any;
+      }
       return {
         ok: true,
         json: async () => ({ data: [] })
@@ -162,6 +181,11 @@ test("includes event funnel breakdown when event rows exist", async () => {
   expect(
     json.events.byPathway.some(
       (row: any) => row.pathway === "aspiring" && row.count === 3
+    )
+  ).toBe(true);
+  expect(
+    json.events.bySourceHost.some(
+      (row: any) => row.sourceHost === "staging.dave-blake.com" && row.count === 7
     )
   ).toBe(true);
 });

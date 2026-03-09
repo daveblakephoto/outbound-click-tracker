@@ -57,7 +57,7 @@ test("stats response caches when enabled", async () => {
   const second = await worker.fetch(request, env);
   expect(second.status).toBe(200);
   expect(second.headers.get("X-Cache")).toBe("HIT");
-  expect(fetchSpy).toHaveBeenCalledTimes(7);
+  expect(fetchSpy).toHaveBeenCalledTimes(8);
 });
 
 test("export response caches when enabled", async () => {
@@ -125,5 +125,5 @@ test("cache keys are scoped by auth token", async () => {
   expect(third.status).toBe(200);
   expect(third.headers.get("X-Cache")).toBe("HIT");
 
-  expect(fetchSpy).toHaveBeenCalledTimes(14);
+  expect(fetchSpy).toHaveBeenCalledTimes(16);
 });

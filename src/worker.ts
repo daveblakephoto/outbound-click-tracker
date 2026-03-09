@@ -468,7 +468,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     uniqueRows,
     placementRows,
     refRows,
-    eventRows
+    eventRows,
+    sourceHostRows
   ] =
     await Promise.all([
       timedQuery(
@@ -512,6 +513,10 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         `SELECT blob3 AS vendor, blob4 AS page, blob7 AS event_type, blob8 AS event_name, blob11 AS date, blob20 AS event_context, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
           ANALYTICS_EVENT_TYPES.EVENT
         )} GROUP BY vendor, page, event_type, event_name, date, event_context`
+      ),
+      timedQuery(
+        "source_hosts",
+        `SELECT blob16 AS source_host, blob1 AS record_type, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} GROUP BY source_host, record_type`
       )
     ]);
 
@@ -554,6 +559,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const eventByTimeline: Record<string, number> = {};
   const eventBySourcePath: Record<string, number> = {};
   const eventByAccessOutcome: Record<string, number> = {};
+  const sourceHostByTotal: Record<string, number> = {};
+  const sourceHostByType: Record<string, Record<string, number>> = {};
   const eventErrorsByType: Record<string, number> = {};
   const eventErrorsByField: Record<string, number> = {};
   const eventSessionByName: Record<string, Set<string>> = {};
@@ -751,6 +758,19 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       refAgg[vendor].external[bucket] =
         (refAgg[vendor].external[bucket] || 0) + count;
     }
+  }
+
+  for (const row of sourceHostRows) {
+    const sourceHost = toMetricValue(row.source_host) || "unknown";
+    const recordType = toMetricValue(row.record_type) || "unknown";
+    const count = toCount(row.count);
+    if (!count) continue;
+    addMetric(sourceHostByTotal, sourceHost, count);
+    if (!sourceHostByType[sourceHost]) {
+      sourceHostByType[sourceHost] = {};
+    }
+    sourceHostByType[sourceHost][recordType] =
+      (sourceHostByType[sourceHost][recordType] || 0) + count;
   }
 
   for (const row of eventRows) {
@@ -963,6 +983,17 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       byPathway: toBreakdown(eventByPathway, "pathway"),
       byTimeline: toBreakdown(eventByTimeline, "timeline"),
       bySourcePath: toBreakdown(eventBySourcePath, "sourcePath"),
+      bySourceHost: toBreakdown(sourceHostByTotal, "sourceHost"),
+      bySourceHostAndType: Object.entries(sourceHostByType)
+        .map(([sourceHost, counts]) => {
+          const byType = toBreakdown(counts, "recordType");
+          return {
+            sourceHost,
+            total: Object.values(counts).reduce((sum, value) => sum + value, 0),
+            byType
+          };
+        })
+        .sort((a, b) => b.total - a.total),
       byAccessOutcome: toBreakdown(eventByAccessOutcome, "accessOutcome"),
       errors: {
         byType: toBreakdown(eventErrorsByType, "errorType"),
