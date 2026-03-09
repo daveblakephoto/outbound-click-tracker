@@ -96,6 +96,41 @@ test("records localhost source context and mobile device class", async () => {
   expect(viewContext.platform).toBe("ios");
 });
 
+test("uses top-level source_env and is_test_traffic for visit payloads", async () => {
+  const analyticsWrites: any[] = [];
+  const payload = {
+    site: "dave-blake.com",
+    vendor: "dave-blake",
+    page: "agency-rates",
+    page_type: "agency-rates",
+    source_env: "staging",
+    is_test_traffic: true,
+    referrer: "https://dave-blake.com/models/",
+    url: "https://dave-blake.com/models/agency-rates/?agency=VIVBNE26"
+  };
+
+  const request = new Request("https://example.com/visit", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.25",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const response = await worker.fetch(request, makeEnv(analyticsWrites));
+
+  expect(response.status).toBe(204);
+  const viewEvent = analyticsWrites.find(point => point?.blobs?.[0] === "view");
+  expect(viewEvent).toBeTruthy();
+  expect(viewEvent.blobs[16]).toBe("staging");
+  const viewContext = JSON.parse(viewEvent.blobs[19]);
+  expect(viewContext.custom.source_env).toBe("staging");
+  expect(viewContext.custom.is_test_traffic).toBe("true");
+});
+
 test("classifies loopback IP source host as local", async () => {
   const analyticsWrites: any[] = [];
   const payload = {

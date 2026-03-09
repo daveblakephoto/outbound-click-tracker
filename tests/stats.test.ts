@@ -130,6 +130,21 @@ test("includes event funnel breakdown when event rows exist", async () => {
                   }
                 }),
                 count: 2
+              },
+              {
+                vendor: "dave-blake",
+                page: "articles-top-modelling-agencies-in-brisbane-how-to-get-signed",
+                event_type: "click",
+                event_name: "db_outbound_click",
+                date: today,
+                event_context: JSON.stringify({
+                  custom: {
+                    funnel_step: "outbound_click",
+                    target_domain: "viviensmodels.com.au",
+                    outbound_kind: "external"
+                  }
+                }),
+                count: 1
               }
             ]
           })
@@ -168,7 +183,7 @@ test("includes event funnel breakdown when event rows exist", async () => {
 
   expect(response.status).toBe(200);
   const json = await response.json();
-  expect(json.events.total).toBe(5);
+  expect(json.events.total).toBe(6);
   expect(
     json.events.byName.some(
       (row: any) =>
@@ -193,6 +208,16 @@ test("includes event funnel breakdown when event rows exist", async () => {
   expect(
     json.events.bySourceEnvironment.some(
       (row: any) => row.sourceEnvironment === "staging" && row.count === 7
+    )
+  ).toBe(true);
+  expect(
+    json.events.byTargetDomain.some(
+      (row: any) => row.targetDomain === "viviensmodels.com.au" && row.count === 1
+    )
+  ).toBe(true);
+  expect(
+    json.events.byOutboundKind.some(
+      (row: any) => row.outboundKind === "external" && row.count === 1
     )
   ).toBe(true);
 });

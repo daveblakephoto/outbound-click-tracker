@@ -322,6 +322,33 @@ const resolveIsTestTraffic = ({
   return sourceEnvironment !== "production";
 };
 
+const mergeTrackingContext = (
+  payload: unknown,
+  customContext: Record<string, string>
+) => {
+  const payloadRecord =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : {};
+  const merged = { ...customContext };
+  const assign = (key: string, value: unknown) => {
+    if (value === undefined || value === null) return;
+    const normalized = String(value).trim();
+    if (!normalized) return;
+    merged[key] = normalized;
+  };
+
+  assign("source_env", payloadRecord.source_env);
+  assign("sourceEnv", payloadRecord.sourceEnv);
+  assign("environment", payloadRecord.environment);
+  assign("env", payloadRecord.env);
+  assign("is_test_traffic", payloadRecord.is_test_traffic);
+  assign("isTestTraffic", payloadRecord.isTestTraffic);
+  assign("test_traffic", payloadRecord.test_traffic);
+  assign("is_test", payloadRecord.is_test);
+  return merged;
+};
+
 let siteConfigCache: {
   rawMap: string;
   rawAllowlist: string;
@@ -662,6 +689,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const eventByPathway: Record<string, number> = {};
   const eventByTimeline: Record<string, number> = {};
   const eventBySourcePath: Record<string, number> = {};
+  const eventByTargetDomain: Record<string, number> = {};
+  const eventByOutboundKind: Record<string, number> = {};
   const eventByAccessOutcome: Record<string, number> = {};
   const eventByTestTraffic: Record<string, number> = {};
   const sourceHostByTotal: Record<string, number> = {};
@@ -956,6 +985,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     const funnelStep = toMetricValue(custom.funnel_step ?? custom.funnelStep);
     const nextStep = toMetricValue(custom.next_step ?? custom.nextStep);
     const sourcePath = toMetricValue(custom.source_path ?? custom.sourcePath);
+    const targetDomain = toMetricValue(custom.target_domain ?? custom.targetDomain);
+    const outboundKind = toMetricValue(custom.outbound_kind ?? custom.outboundKind);
     const pathway = toMetricValue(custom.pathway);
     const timeline = toMetricValue(custom.timeline);
     const accessOutcome = toMetricValue(custom.access_outcome ?? custom.accessOutcome);
@@ -990,6 +1021,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     addMetric(eventByFunnelStep, funnelStep, count);
     addMetric(eventByNextStep, nextStep, count);
     addMetric(eventBySourcePath, sourcePath, count);
+    addMetric(eventByTargetDomain, targetDomain, count);
+    addMetric(eventByOutboundKind, outboundKind, count);
     addMetric(eventByPathway, pathway, count);
     addMetric(eventByTimeline, timeline, count);
     addMetric(eventByAccessOutcome, accessOutcome, count);
@@ -1170,6 +1203,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       byPathway: toBreakdown(eventByPathway, "pathway"),
       byTimeline: toBreakdown(eventByTimeline, "timeline"),
       bySourcePath: toBreakdown(eventBySourcePath, "sourcePath"),
+      byTargetDomain: toBreakdown(eventByTargetDomain, "targetDomain"),
+      byOutboundKind: toBreakdown(eventByOutboundKind, "outboundKind"),
       bySourceHost: toBreakdown(sourceHostByTotal, "sourceHost"),
       bySourceEnvironment: toBreakdown(
         sourceEnvironmentByTotal,
@@ -2748,6 +2783,7 @@ export default {
           payload.context ??
           payload.custom
       );
+      const trackingContext = mergeTrackingContext(payload, customContext);
       const eventId = normalizeEventId(
         validation.eventId ??
           payload.event_id ??
@@ -2768,16 +2804,16 @@ export default {
         }
       }
       const sourceEnvironment = resolveSourceEnvironment({
-        customContext,
+        customContext: trackingContext,
         sourceHost,
         site: analyticsSite
       });
       const isTestTraffic = resolveIsTestTraffic({
-        customContext,
+        customContext: trackingContext,
         sourceEnvironment
       });
       const rawErrorType = String(
-        customContext.error_type ?? customContext.errorType ?? ""
+        trackingContext.error_type ?? trackingContext.errorType ?? ""
       )
         .trim()
         .toLowerCase();
@@ -2806,7 +2842,7 @@ export default {
         platform,
         referrerDomain,
         customContext: {
-          ...customContext,
+          ...trackingContext,
           event_name: validation.eventName,
           event_type: validation.eventType,
           session_id: validation.sessionId,
@@ -3014,13 +3050,14 @@ export default {
           payload.context ??
           payload.custom
       );
+      const trackingContext = mergeTrackingContext(payload, customContext);
       const sourceEnvironment = resolveSourceEnvironment({
-        customContext,
+        customContext: trackingContext,
         sourceHost,
         site: analyticsSite
       });
       const isTestTraffic = resolveIsTestTraffic({
-        customContext,
+        customContext: trackingContext,
         sourceEnvironment
       });
       const legacyTierForAnalytics =
@@ -3063,7 +3100,7 @@ export default {
         platform,
         referrerDomain,
         customContext: {
-          ...customContext,
+          ...trackingContext,
           source_env: sourceEnvironment,
           environment: sourceEnvironment,
           is_test_traffic: isTestTraffic ? "true" : "false"

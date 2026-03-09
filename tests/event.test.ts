@@ -62,6 +62,45 @@ test("records generic event payload in analytics blobs", async () => {
   expect(context.custom.session_id).toBe("mfs_abc123456");
 });
 
+test("uses top-level source_env and is_test_traffic when custom_context omits them", async () => {
+  const writes: any[] = [];
+  const request = new Request("https://example.com/event", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.45",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+    },
+    body: JSON.stringify({
+      event_schema_version: "event_v1",
+      site: "dave-blake.com",
+      vendor: "dave-blake",
+      event_name: "db_models_page_view",
+      event_type: "view",
+      page: "models-index",
+      session_id: "mfs_top_level_env_123",
+      source_env: "staging",
+      is_test_traffic: true,
+      custom_context: {
+        funnel_step: "models_page_view"
+      },
+      referrer: "https://dave-blake.com/",
+      url: "https://dave-blake.com/models/"
+    })
+  });
+
+  const response = await worker.fetch(request, makeEnv(writes));
+  expect(response.status).toBe(204);
+
+  const eventWrite = writes.find(point => point?.blobs?.[0] === "event");
+  expect(eventWrite).toBeTruthy();
+  expect(eventWrite.blobs[16]).toBe("staging");
+  const context = JSON.parse(eventWrite.blobs[19]);
+  expect(context.custom.source_env).toBe("staging");
+  expect(context.custom.is_test_traffic).toBe("true");
+});
+
 test("dedupes repeated event_id within dedupe window", async () => {
   const writes: any[] = [];
   const payload = {
