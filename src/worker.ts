@@ -415,7 +415,15 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     return data;
   };
 
-  const [clickRows, viewRows, dailyViewRows, uniqueRows, placementRows, refRows] =
+  const [
+    clickRows,
+    viewRows,
+    dailyViewRows,
+    uniqueRows,
+    placementRows,
+    refRows,
+    eventRows
+  ] =
     await Promise.all([
       timedQuery(
         "clicks",
@@ -452,6 +460,12 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         `SELECT blob3 AS vendor, blob9 AS scope, blob10 AS bucket, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
           ANALYTICS_EVENT_TYPES.REFERRER
         )} AND blob3 != '' GROUP BY vendor, scope, bucket`
+      ),
+      timedQuery(
+        "events",
+        `SELECT blob3 AS vendor, blob4 AS page, blob6 AS event_type, blob7 AS event_name, blob11 AS date, blob19 AS event_context, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+          ANALYTICS_EVENT_TYPES.EVENT
+        )} GROUP BY vendor, page, event_type, event_name, date, event_context`
       )
     ]);
 
@@ -483,6 +497,54 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const dailyTotals = Object.fromEntries(dates.map(d => [d, 0]));
   const dailyViews = Object.fromEntries(dates.map(d => [d, 0]));
   const dailyUniqueViews = Object.fromEntries(dates.map(d => [d, 0]));
+  const eventDailyTotals = Object.fromEntries(dates.map(d => [d, 0]));
+  const eventDailyByName: Record<string, Record<string, number>> = {};
+  const eventByName: Record<string, number> = {};
+  const eventByType: Record<string, number> = {};
+  const eventByPage: Record<string, number> = {};
+  const eventByFunnelStep: Record<string, number> = {};
+  const eventByNextStep: Record<string, number> = {};
+  const eventByPathway: Record<string, number> = {};
+  const eventByTimeline: Record<string, number> = {};
+  const eventBySourcePath: Record<string, number> = {};
+  const eventByAccessOutcome: Record<string, number> = {};
+  const eventErrorsByType: Record<string, number> = {};
+  const eventErrorsByField: Record<string, number> = {};
+
+  const toMetricValue = (value: unknown) => {
+    const normalized = String(value || "")
+      .trim()
+      .toLowerCase();
+    if (!normalized) return "";
+    return normalized.slice(0, 96);
+  };
+
+  const addMetric = (target: Record<string, number>, key: string, count: number) => {
+    if (!key || !count) return;
+    target[key] = (target[key] || 0) + count;
+  };
+
+  const readEventCustomContext = (rawContext: unknown) => {
+    if (typeof rawContext !== "string" || !rawContext.trim()) return {};
+    try {
+      const parsed = JSON.parse(rawContext);
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        !("custom" in parsed)
+      ) {
+        return {};
+      }
+      const custom = (parsed as any).custom;
+      if (!custom || typeof custom !== "object" || Array.isArray(custom)) {
+        return {};
+      }
+      return custom as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  };
 
   for (const row of clickRows) {
     const vendor = String(row.vendor || "").trim();
@@ -605,6 +667,63 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     }
   }
 
+  for (const row of eventRows) {
+    const eventName = toMetricValue(row.event_name);
+    const eventType = toMetricValue(row.event_type);
+    const page = toMetricValue(row.page);
+    const date = String(row.date || "").trim();
+    const count = toCount(row.count);
+    if (!eventName || !eventType || !count) continue;
+
+    addMetric(eventByName, eventName, count);
+    addMetric(eventByType, eventType, count);
+    addMetric(eventByPage, page || "unknown", count);
+
+    if (date in eventDailyTotals) {
+      eventDailyTotals[date] += count;
+      if (!eventDailyByName[eventName]) {
+        eventDailyByName[eventName] = {};
+      }
+      eventDailyByName[eventName][date] =
+        (eventDailyByName[eventName][date] || 0) + count;
+    }
+
+    const custom = readEventCustomContext(row.event_context);
+    const funnelStep = toMetricValue(custom.funnel_step ?? custom.funnelStep);
+    const nextStep = toMetricValue(custom.next_step ?? custom.nextStep);
+    const sourcePath = toMetricValue(custom.source_path ?? custom.sourcePath);
+    const pathway = toMetricValue(custom.pathway);
+    const timeline = toMetricValue(custom.timeline);
+    const accessOutcome = toMetricValue(custom.access_outcome ?? custom.accessOutcome);
+    const errorType = toMetricValue(custom.error_type ?? custom.errorType);
+    const fieldName = toMetricValue(custom.field_name ?? custom.fieldName);
+
+    addMetric(eventByFunnelStep, funnelStep, count);
+    addMetric(eventByNextStep, nextStep, count);
+    addMetric(eventBySourcePath, sourcePath, count);
+    addMetric(eventByPathway, pathway, count);
+    addMetric(eventByTimeline, timeline, count);
+    addMetric(eventByAccessOutcome, accessOutcome, count);
+    addMetric(eventErrorsByType, errorType, count);
+    addMetric(eventErrorsByField, fieldName, count);
+  }
+
+  const toBreakdown = (source: Record<string, number>, key: string) =>
+    Object.entries(source)
+      .sort((a, b) => b[1] - a[1])
+      .map(([value, count]) => ({ [key]: value, count }));
+
+  const eventDailyByNameRows = Object.entries(eventDailyByName).flatMap(
+    ([eventName, byDate]) =>
+      dates
+        .map(date => ({
+          date,
+          eventName,
+          count: byDate[date] || 0
+        }))
+        .filter(entry => entry.count > 0)
+  );
+
   const vendorsSet = new Set([
     ...Object.keys(vendorAgg),
     ...Object.keys(viewAgg),
@@ -718,7 +837,28 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     daily,
     dailyViews: dailyViewTotals,
     dailyUniqueViews: dailyUniqueViewTotals,
-    tierViews
+    tierViews,
+    events: {
+      total: Object.values(eventByName).reduce((sum, value) => sum + value, 0),
+      byName: toBreakdown(eventByName, "eventName"),
+      byType: toBreakdown(eventByType, "eventType"),
+      byPage: toBreakdown(eventByPage, "page"),
+      byFunnelStep: toBreakdown(eventByFunnelStep, "funnelStep"),
+      byNextStep: toBreakdown(eventByNextStep, "nextStep"),
+      byPathway: toBreakdown(eventByPathway, "pathway"),
+      byTimeline: toBreakdown(eventByTimeline, "timeline"),
+      bySourcePath: toBreakdown(eventBySourcePath, "sourcePath"),
+      byAccessOutcome: toBreakdown(eventByAccessOutcome, "accessOutcome"),
+      errors: {
+        byType: toBreakdown(eventErrorsByType, "errorType"),
+        byField: toBreakdown(eventErrorsByField, "fieldName")
+      },
+      daily: dates.map(date => ({
+        date,
+        total: eventDailyTotals[date] || 0
+      })),
+      dailyByName: eventDailyByNameRows
+    }
   };
   if (dataSource) {
     payload.dataSource = dataSource;

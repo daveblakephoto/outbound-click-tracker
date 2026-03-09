@@ -91,6 +91,81 @@ test("returns current stats from Analytics Engine", async () => {
   expect(vendor.website).toBe(3);
 });
 
+test("includes event funnel breakdown when event rows exist", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (_url, init) => {
+      const sql = String(init?.body || "");
+      if (sql.includes("blob1 = 'event'")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                vendor: "dave-blake",
+                page: "models-contact",
+                event_type: "submit",
+                event_name: "db_contact_form_submit_success",
+                date: today,
+                event_context: JSON.stringify({
+                  custom: {
+                    funnel_step: "submit_success",
+                    pathway: "aspiring",
+                    timeline: "2-4-weeks"
+                  }
+                }),
+                count: 3
+              },
+              {
+                vendor: "dave-blake",
+                page: "models-contact",
+                event_type: "error",
+                event_name: "db_contact_form_submit_error",
+                date: today,
+                event_context: JSON.stringify({
+                  custom: {
+                    funnel_step: "submit_error",
+                    error_type: "client_validation",
+                    field_name: "age"
+                  }
+                }),
+                count: 2
+              }
+            ]
+          })
+        } as any;
+      }
+      return {
+        ok: true,
+        json: async () => ({ data: [] })
+      } as any;
+    }
+  );
+
+  const response = await worker.fetch(makeRequest(), makeEnv());
+  fetchSpy.mockRestore();
+
+  expect(response.status).toBe(200);
+  const json = await response.json();
+  expect(json.events.total).toBe(5);
+  expect(
+    json.events.byName.some(
+      (row: any) =>
+        row.eventName === "db_contact_form_submit_success" && row.count === 3
+    )
+  ).toBe(true);
+  expect(
+    json.events.errors.byType.some(
+      (row: any) => row.errorType === "client_validation" && row.count === 2
+    )
+  ).toBe(true);
+  expect(
+    json.events.byPathway.some(
+      (row: any) => row.pathway === "aspiring" && row.count === 3
+    )
+  ).toBe(true);
+});
+
 test("clamps unique views to total views", async () => {
   const today = new Date().toISOString().slice(0, 10);
   const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
