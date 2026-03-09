@@ -463,7 +463,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       ),
       timedQuery(
         "events",
-        `SELECT blob3 AS vendor, blob4 AS page, blob6 AS event_type, blob7 AS event_name, blob11 AS date, blob19 AS event_context, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+        `SELECT blob3 AS vendor, blob4 AS page, blob7 AS event_type, blob8 AS event_name, blob11 AS date, blob20 AS event_context, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
           ANALYTICS_EVENT_TYPES.EVENT
         )} GROUP BY vendor, page, event_type, event_name, date, event_context`
       )
