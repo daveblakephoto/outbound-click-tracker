@@ -135,18 +135,20 @@ test("includes event funnel breakdown when event rows exist", async () => {
           })
         } as any;
       }
-      if (sql.includes("GROUP BY source_host, record_type")) {
+      if (sql.includes("GROUP BY source_host, source_env, record_type")) {
         return {
           ok: true,
           json: async () => ({
             data: [
               {
                 source_host: "staging.dave-blake.com",
+                source_env: "staging",
                 record_type: "event",
                 count: 5
               },
               {
                 source_host: "staging.dave-blake.com",
+                source_env: "staging",
                 record_type: "referrer",
                 count: 2
               }
@@ -186,6 +188,11 @@ test("includes event funnel breakdown when event rows exist", async () => {
   expect(
     json.events.bySourceHost.some(
       (row: any) => row.sourceHost === "staging.dave-blake.com" && row.count === 7
+    )
+  ).toBe(true);
+  expect(
+    json.events.bySourceEnvironment.some(
+      (row: any) => row.sourceEnvironment === "staging" && row.count === 7
     )
   ).toBe(true);
 });
@@ -398,6 +405,40 @@ test("applies source_host filter to analytics engine queries", async () => {
   expect(
     sqlStatements.some(sql => sql.includes("AND blob16 = 'staging.dave-blake.com'"))
   ).toBe(true);
+  expect(sqlStatements.some(sql => sql.includes("AND blob17 = 'production'"))).toBe(
+    true
+  );
+});
+
+test("applies environment filter and traffic mode to analytics engine queries", async () => {
+  const sqlStatements: string[] = [];
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (_url, init) => {
+      sqlStatements.push(String(init?.body || ""));
+      return {
+        ok: true,
+        json: async () => ({ data: [] })
+      } as any;
+    }
+  );
+
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d&environment=staging&traffic=all",
+    {
+      headers: { Authorization: "Bearer test-secret" }
+    }
+  );
+
+  const response = await worker.fetch(request, makeEnv());
+  fetchSpy.mockRestore();
+
+  expect(response.status).toBe(200);
+  expect(
+    sqlStatements.some(sql => sql.includes("AND blob17 = 'staging'"))
+  ).toBe(true);
+  expect(
+    sqlStatements.some(sql => sql.includes("AND blob17 = 'production'"))
+  ).toBe(false);
 });
 
 test("rejects range larger than 90d", async () => {

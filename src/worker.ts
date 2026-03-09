@@ -66,6 +66,7 @@ type AnalyticsEventFields = {
   agencySlug?: string;
   pageType?: string;
   sourceHost?: string;
+  sourceEnv?: string;
   deviceClass?: string;
   refChannel?: string;
   eventContext?: string;
@@ -122,8 +123,7 @@ const buildAnalyticsBlobs = (fields: AnalyticsEventFields) => {
   blobs[ANALYTICS_BLOBS.AGENCY_SLUG] = fields.agencySlug || "";
   blobs[ANALYTICS_BLOBS.PAGE_TYPE] = fields.pageType || "";
   blobs[ANALYTICS_BLOBS.SOURCE_HOST] = fields.sourceHost || "";
-  // Reserved for backward-compatibility with historic blob position.
-  blobs[ANALYTICS_BLOBS.SOURCE_ENV] = "";
+  blobs[ANALYTICS_BLOBS.SOURCE_ENV] = fields.sourceEnv || "";
   blobs[ANALYTICS_BLOBS.DEVICE_CLASS] = fields.deviceClass || "";
   blobs[ANALYTICS_BLOBS.REF_CHANNEL] = fields.refChannel || "";
   blobs[ANALYTICS_BLOBS.EVENT_CONTEXT] = fields.eventContext || "";
@@ -238,6 +238,77 @@ const inferSiteEnvironment = (site: string) => {
     return "development";
   }
   return "production";
+};
+
+const SOURCE_ENV_VALUES = new Set([
+  "production",
+  "staging",
+  "preview",
+  "development",
+  "local",
+  "unknown"
+]);
+
+const normalizeSourceEnvironment = (value: unknown) => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return "";
+  if (SOURCE_ENV_VALUES.has(normalized)) return normalized;
+  if (normalized === "prod") return "production";
+  if (normalized === "stage") return "staging";
+  if (normalized === "dev") return "development";
+  return "";
+};
+
+const parseBooleanLike = (value: unknown) => {
+  if (typeof value === "boolean") return value;
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return null;
+  if (normalized === "1" || normalized === "true" || normalized === "yes") {
+    return true;
+  }
+  if (normalized === "0" || normalized === "false" || normalized === "no") {
+    return false;
+  }
+  return null;
+};
+
+const resolveSourceEnvironment = ({
+  customContext,
+  sourceHost,
+  site
+}: {
+  customContext: Record<string, string>;
+  sourceHost: string;
+  site: string;
+}) => {
+  const explicit =
+    normalizeSourceEnvironment(customContext.source_env) ||
+    normalizeSourceEnvironment(customContext.sourceEnv) ||
+    normalizeSourceEnvironment(customContext.environment) ||
+    normalizeSourceEnvironment(customContext.env);
+  if (explicit) return explicit;
+  if (sourceHost) return inferSiteEnvironment(sourceHost);
+  if (site) return inferSiteEnvironment(site);
+  return "unknown";
+};
+
+const resolveIsTestTraffic = ({
+  customContext,
+  sourceEnvironment
+}: {
+  customContext: Record<string, string>;
+  sourceEnvironment: string;
+}) => {
+  const explicit =
+    parseBooleanLike(customContext.is_test_traffic) ??
+    parseBooleanLike(customContext.isTestTraffic) ??
+    parseBooleanLike(customContext.test_traffic);
+  if (explicit !== null) return explicit;
+  return sourceEnvironment !== "production";
 };
 
 let siteConfigCache: {
@@ -425,6 +496,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   env,
   site,
   sourceHostFilter,
+  sourceEnvironmentFilter,
+  trafficMode,
   range,
   dates,
   requestHost,
@@ -437,6 +510,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   env: any;
   site: string;
   sourceHostFilter?: string;
+  sourceEnvironmentFilter?: string;
+  trafficMode?: "production" | "test" | "all";
   range: string;
   dates: string[];
   requestHost?: string;
@@ -456,9 +531,20 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       ? " AND blob16 = ''"
       : ` AND blob16 = ${sqlString(sourceHostFilter)}`
     : "";
+  const sourceEnvironmentWhere = sourceEnvironmentFilter
+    ? sourceEnvironmentFilter === "unknown"
+      ? " AND blob17 = ''"
+      : ` AND blob17 = ${sqlString(sourceEnvironmentFilter)}`
+    : "";
+  const trafficWhere =
+    trafficMode === "test"
+      ? " AND blob17 != 'production'"
+      : trafficMode === "production"
+        ? " AND blob17 = 'production'"
+        : "";
   const baseWhere = `WHERE blob2 = ${sqlString(site)} AND blob11 >= ${sqlString(
     startDate
-  )} AND blob11 <= ${sqlString(endDate)}${sourceHostWhere}`;
+  )} AND blob11 <= ${sqlString(endDate)}${sourceHostWhere}${sourceEnvironmentWhere}${trafficWhere}`;
 
   const timings: Record<string, number> = {};
   const timedQuery = async (label: string, sql: string) => {
@@ -523,7 +609,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       ),
       timedQuery(
         "source_hosts",
-        `SELECT blob16 AS source_host, blob1 AS record_type, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} GROUP BY source_host, record_type`
+        `SELECT blob16 AS source_host, blob17 AS source_env, blob1 AS record_type, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} GROUP BY source_host, source_env, record_type`
       )
     ]);
 
@@ -566,9 +652,13 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const eventByTimeline: Record<string, number> = {};
   const eventBySourcePath: Record<string, number> = {};
   const eventByAccessOutcome: Record<string, number> = {};
+  const eventByTestTraffic: Record<string, number> = {};
   const sourceHostByTotal: Record<string, number> = {};
   const sourceHostByType: Record<string, Record<string, number>> = {};
+  const sourceEnvironmentByTotal: Record<string, number> = {};
+  const sourceEnvironmentByType: Record<string, Record<string, number>> = {};
   const eventErrorsByType: Record<string, number> = {};
+  const eventErrorsByClass: Record<string, number> = {};
   const eventErrorsByField: Record<string, number> = {};
   const eventSessionByName: Record<string, Set<string>> = {};
   const eventSessionByFunnelStep: Record<string, Set<string>> = {};
@@ -622,6 +712,48 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     if (!candidate || candidate.length > 128) return "";
     if (!SESSION_ID_REGEX.test(candidate)) return "";
     return candidate;
+  };
+
+  const classifyErrorClass = ({
+    eventName,
+    errorType,
+    httpStatus
+  }: {
+    eventName: string;
+    errorType: string;
+    httpStatus: number;
+  }) => {
+    const normalizedEventName = toMetricValue(eventName);
+    const normalizedErrorType = toMetricValue(errorType);
+    if (
+      normalizedErrorType.includes("validation") ||
+      normalizedErrorType.includes("field")
+    ) {
+      return "validation";
+    }
+    if (
+      normalizedErrorType.includes("network") ||
+      normalizedErrorType.includes("fetch") ||
+      normalizedErrorType.includes("timeout")
+    ) {
+      return "network";
+    }
+    if (
+      normalizedErrorType.includes("turnstile") ||
+      normalizedErrorType.includes("captcha") ||
+      normalizedErrorType.includes("security")
+    ) {
+      return "turnstile";
+    }
+    if (httpStatus >= 500) return "server";
+    if (httpStatus >= 400) return "validation";
+    if (
+      normalizedEventName.includes("error") ||
+      normalizedErrorType.includes("server")
+    ) {
+      return "unknown";
+    }
+    return "";
   };
 
   const readEventCustomContext = (rawContext: unknown) => {
@@ -769,15 +901,22 @@ const buildStatsResponseFromAnalyticsEngine = async ({
 
   for (const row of sourceHostRows) {
     const sourceHost = toMetricValue(row.source_host) || "unknown";
+    const sourceEnvironment = toMetricValue(row.source_env) || "unknown";
     const recordType = toMetricValue(row.record_type) || "unknown";
     const count = toCount(row.count);
     if (!count) continue;
     addMetric(sourceHostByTotal, sourceHost, count);
+    addMetric(sourceEnvironmentByTotal, sourceEnvironment, count);
     if (!sourceHostByType[sourceHost]) {
       sourceHostByType[sourceHost] = {};
     }
     sourceHostByType[sourceHost][recordType] =
       (sourceHostByType[sourceHost][recordType] || 0) + count;
+    if (!sourceEnvironmentByType[sourceEnvironment]) {
+      sourceEnvironmentByType[sourceEnvironment] = {};
+    }
+    sourceEnvironmentByType[sourceEnvironment][recordType] =
+      (sourceEnvironmentByType[sourceEnvironment][recordType] || 0) + count;
   }
 
   for (const row of eventRows) {
@@ -811,6 +950,31 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     const accessOutcome = toMetricValue(custom.access_outcome ?? custom.accessOutcome);
     const errorType = toMetricValue(custom.error_type ?? custom.errorType);
     const fieldName = toMetricValue(custom.field_name ?? custom.fieldName);
+    const sourceEnvironment = toMetricValue(
+      custom.source_env ?? custom.sourceEnv ?? custom.environment
+    );
+    const explicitIsTestTraffic =
+      parseBooleanLike(custom.is_test_traffic ?? custom.isTestTraffic) ??
+      parseBooleanLike(custom.test_traffic);
+    const testTrafficKey =
+      explicitIsTestTraffic === true
+        ? "test"
+        : explicitIsTestTraffic === false
+          ? "production"
+          : sourceEnvironment && sourceEnvironment !== "production"
+            ? "test"
+            : sourceEnvironment === "production"
+              ? "production"
+              : "unknown";
+    const httpStatusRaw = Number(
+      custom.http_status ?? custom.httpStatus ?? custom.status_code ?? 0
+    );
+    const httpStatus = Number.isFinite(httpStatusRaw) ? httpStatusRaw : 0;
+    const errorClass = classifyErrorClass({
+      eventName,
+      errorType,
+      httpStatus
+    });
 
     addMetric(eventByFunnelStep, funnelStep, count);
     addMetric(eventByNextStep, nextStep, count);
@@ -818,7 +982,9 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     addMetric(eventByPathway, pathway, count);
     addMetric(eventByTimeline, timeline, count);
     addMetric(eventByAccessOutcome, accessOutcome, count);
+    addMetric(eventByTestTraffic, testTrafficKey, count);
     addMetric(eventErrorsByType, errorType, count);
+    addMetric(eventErrorsByClass, errorClass, count);
     addMetric(eventErrorsByField, fieldName, count);
 
     if (sessionId) {
@@ -972,6 +1138,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     site,
     environment: siteEnvironment,
     sourceHostFilter: sourceHostFilter || "",
+    environmentFilter: sourceEnvironmentFilter || "",
+    trafficMode: trafficMode || "all",
     endpointHost,
     range,
     contractVersion: CONTRACT_VERSION,
@@ -992,6 +1160,10 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       byTimeline: toBreakdown(eventByTimeline, "timeline"),
       bySourcePath: toBreakdown(eventBySourcePath, "sourcePath"),
       bySourceHost: toBreakdown(sourceHostByTotal, "sourceHost"),
+      bySourceEnvironment: toBreakdown(
+        sourceEnvironmentByTotal,
+        "sourceEnvironment"
+      ),
       bySourceHostAndType: Object.entries(sourceHostByType)
         .map(([sourceHost, counts]) => {
           const byType = toBreakdown(counts, "recordType");
@@ -1002,9 +1174,21 @@ const buildStatsResponseFromAnalyticsEngine = async ({
           };
         })
         .sort((a, b) => b.total - a.total),
+      bySourceEnvironmentAndType: Object.entries(sourceEnvironmentByType)
+        .map(([sourceEnvironment, counts]) => {
+          const byType = toBreakdown(counts, "recordType");
+          return {
+            sourceEnvironment,
+            total: Object.values(counts).reduce((sum, value) => sum + value, 0),
+            byType
+          };
+        })
+        .sort((a, b) => b.total - a.total),
+      byTestTraffic: toBreakdown(eventByTestTraffic, "trafficType"),
       byAccessOutcome: toBreakdown(eventByAccessOutcome, "accessOutcome"),
       errors: {
         byType: toBreakdown(eventErrorsByType, "errorType"),
+        byClass: toBreakdown(eventErrorsByClass, "errorClass"),
         byField: toBreakdown(eventErrorsByField, "fieldName")
       },
       daily: dates.map(date => ({
@@ -1604,10 +1788,12 @@ const hmacSha256Hex = async (secret: string, payload: string) => {
 
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const UNIQUE_VIEW_WINDOW_MS = 30 * 60_000;
+const EVENT_DEDUPE_WINDOW_MS = 5 * 60_000;
 const IN_MEMORY_COUNTER_MAX = 20_000;
 const inMemoryRateLimitCounts = new Map<string, number>();
 const inMemoryRateLimitExpirations = new Map<string, number>();
 const inMemoryUniqueViewLocks = new Map<string, number>();
+const inMemoryEventDedupeLocks = new Map<string, number>();
 
 const pruneExpiredInMemory = (store: Map<string, number>, nowMs: number) => {
   if (store.size < IN_MEMORY_COUNTER_MAX) return;
@@ -1626,6 +1812,22 @@ const acquireUniqueViewLock = (key: string, nowMs = Date.now()) => {
   if (expiresAt > nowMs) return false;
   inMemoryUniqueViewLocks.set(key, nowMs + UNIQUE_VIEW_WINDOW_MS);
   pruneExpiredInMemory(inMemoryUniqueViewLocks, nowMs);
+  return true;
+};
+
+const normalizeEventId = (value: unknown) => {
+  const candidate = String(value || "").trim();
+  if (!candidate) return "";
+  if (candidate.length > 128) return "";
+  if (!/^[A-Za-z0-9_.:-]+$/.test(candidate)) return "";
+  return candidate;
+};
+
+const acquireEventDedupeLock = (key: string, nowMs = Date.now()) => {
+  const expiresAt = inMemoryEventDedupeLocks.get(key) || 0;
+  if (expiresAt > nowMs) return false;
+  inMemoryEventDedupeLocks.set(key, nowMs + EVENT_DEDUPE_WINDOW_MS);
+  pruneExpiredInMemory(inMemoryEventDedupeLocks, nowMs);
   return true;
 };
 
@@ -1926,6 +2128,13 @@ const validateEventPayload = (input, allowlists) => {
         ? input.eventSchemaVersion
         : "";
   const safeSchemaVersion = safeSchemaVersionRaw.trim();
+  const safeEventIdRaw =
+    typeof input?.event_id === "string"
+      ? input.event_id
+      : typeof input?.eventId === "string"
+        ? input.eventId
+        : "";
+  const safeEventId = safeEventIdRaw.trim();
   const safeCity =
     typeof input?.city === "string" ? input.city.trim().toLowerCase() : "";
   const safeAgencySlugRaw =
@@ -1954,6 +2163,7 @@ const validateEventPayload = (input, allowlists) => {
     safePage.length > 64 ||
     safeSessionId.length > 128 ||
     (safeSchemaVersion && safeSchemaVersion.length > 32) ||
+    (safeEventId && safeEventId.length > 128) ||
     (safeVendor && safeVendor.length > 64) ||
     (safeCity && safeCity.length > 64) ||
     (safeAgencySlug && safeAgencySlug.length > 64) ||
@@ -1967,6 +2177,15 @@ const validateEventPayload = (input, allowlists) => {
   }
   if (!SESSION_ID_REGEX.test(safeSessionId)) {
     return { ok: false, error: "Invalid session_id" };
+  }
+  if (safeEventId && !normalizeEventId(safeEventId)) {
+    return { ok: false, error: "Invalid event_id" };
+  }
+  if (
+    safeSchemaVersion &&
+    !/^event_v[0-9]+(?:[._-][a-z0-9]+)*$/i.test(safeSchemaVersion)
+  ) {
+    return { ok: false, error: "Invalid event_schema_version" };
   }
   if (safeVendor && !isSafeSlug(safeVendor)) {
     return { ok: false, error: "Invalid parameters" };
@@ -2003,6 +2222,7 @@ const validateEventPayload = (input, allowlists) => {
     eventType: safeEventType,
     sessionId: safeSessionId,
     schemaVersion: safeSchemaVersion || "event_v1",
+    eventId: safeEventId,
     city: safeCity,
     agencySlug: safeAgencySlug,
     pageType: safePageType
@@ -2344,11 +2564,13 @@ export default {
         );
 
         const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+        const sourceEnvironment = inferSiteEnvironment(analyticsSite);
         writeAnalyticsEvent(env, {
           eventType: ANALYTICS_EVENT_TYPES.CLICK,
           site: analyticsSite,
           vendor,
           clickType: type,
+          sourceEnv: sourceEnvironment,
           signature: clickSignature,
           date
         });
@@ -2515,6 +2737,58 @@ export default {
           payload.context ??
           payload.custom
       );
+      const eventId = normalizeEventId(
+        validation.eventId ??
+          payload.event_id ??
+          payload.eventId ??
+          customContext.event_id ??
+          customContext.eventId
+      );
+      if (eventId) {
+        const dedupeKey = `event:${analyticsSite}:${validation.sessionId}:${eventId}`;
+        if (!acquireEventDedupeLock(dedupeKey)) {
+          return new Response(null, {
+            status: 202,
+            headers: {
+              "X-Event-Deduped": "1",
+              ...corsHeaders
+            }
+          });
+        }
+      }
+      const sourceEnvironment = resolveSourceEnvironment({
+        customContext,
+        sourceHost,
+        site: analyticsSite
+      });
+      const isTestTraffic = resolveIsTestTraffic({
+        customContext,
+        sourceEnvironment
+      });
+      const rawErrorType = String(
+        customContext.error_type ?? customContext.errorType ?? ""
+      )
+        .trim()
+        .toLowerCase();
+      let errorClass = "";
+      if (
+        rawErrorType.includes("validation") ||
+        rawErrorType.includes("field")
+      ) {
+        errorClass = "validation";
+      } else if (
+        rawErrorType.includes("network") ||
+        rawErrorType.includes("fetch")
+      ) {
+        errorClass = "network";
+      } else if (
+        rawErrorType.includes("turnstile") ||
+        rawErrorType.includes("captcha")
+      ) {
+        errorClass = "turnstile";
+      } else if (rawErrorType) {
+        errorClass = "unknown";
+      }
       const eventContext = buildEventContext({
         sourcePath,
         sourceQuery,
@@ -2525,7 +2799,12 @@ export default {
           event_name: validation.eventName,
           event_type: validation.eventType,
           session_id: validation.sessionId,
-          schema_version: validation.schemaVersion
+          schema_version: validation.schemaVersion,
+          event_id: eventId || "",
+          source_env: sourceEnvironment,
+          environment: sourceEnvironment,
+          is_test_traffic: isTestTraffic ? "true" : "false",
+          error_class: errorClass
         }
       });
 
@@ -2541,6 +2820,7 @@ export default {
         agencySlug: validation.agencySlug,
         pageType: validation.pageType,
         sourceHost,
+        sourceEnv: sourceEnvironment,
         deviceClass,
         refChannel,
         eventContext,
@@ -2558,6 +2838,7 @@ export default {
           agencySlug: validation.agencySlug,
           pageType: validation.pageType,
           sourceHost,
+          sourceEnv: sourceEnvironment,
           deviceClass,
           refChannel,
           eventContext,
@@ -2722,6 +3003,15 @@ export default {
           payload.context ??
           payload.custom
       );
+      const sourceEnvironment = resolveSourceEnvironment({
+        customContext,
+        sourceHost,
+        site: analyticsSite
+      });
+      const isTestTraffic = resolveIsTestTraffic({
+        customContext,
+        sourceEnvironment
+      });
       const legacyTierForAnalytics =
         validation.tier && validation.tier !== plan ? validation.tier : "";
 
@@ -2761,7 +3051,12 @@ export default {
         sourceQuery,
         platform,
         referrerDomain,
-        customContext
+        customContext: {
+          ...customContext,
+          source_env: sourceEnvironment,
+          environment: sourceEnvironment,
+          is_test_traffic: isTestTraffic ? "true" : "false"
+        }
       });
 
       writeAnalyticsEvent(env, {
@@ -2775,6 +3070,7 @@ export default {
         agencySlug,
         pageType,
         sourceHost,
+        sourceEnv: sourceEnvironment,
         deviceClass,
         refChannel,
         eventContext,
@@ -2795,6 +3091,7 @@ export default {
           agencySlug,
           pageType,
           sourceHost,
+          sourceEnv: sourceEnvironment,
           deviceClass,
           refChannel,
           eventContext,
@@ -2820,6 +3117,7 @@ export default {
           agencySlug,
           pageType,
           sourceHost,
+          sourceEnv: sourceEnvironment,
           deviceClass,
           refChannel,
           eventContext,
@@ -2839,6 +3137,7 @@ export default {
           agencySlug,
           pageType,
           sourceHost,
+          sourceEnv: sourceEnvironment,
           deviceClass,
           refChannel,
           eventContext,
@@ -2955,6 +3254,9 @@ export default {
       const siteParam = url.searchParams.get("site");
       const range = url.searchParams.get("range") || "28d";
       const sourceHostParam = url.searchParams.get("source_host") || "";
+      const sourceEnvironmentParam =
+        url.searchParams.get("environment") || "";
+      const trafficParam = url.searchParams.get("traffic") || "";
 
       if (!siteParam) {
         return new Response("Missing site", {
@@ -2985,6 +3287,45 @@ export default {
             headers: corsHeaders
           });
         }
+      }
+      let sourceEnvironmentFilter = "";
+      if (sourceEnvironmentParam.trim()) {
+        const normalizedSourceEnvironment = normalizeSourceEnvironment(
+          sourceEnvironmentParam
+        );
+        if (normalizedSourceEnvironment && normalizedSourceEnvironment !== "all") {
+          sourceEnvironmentFilter = normalizedSourceEnvironment;
+        } else if (sourceEnvironmentParam.trim().toLowerCase() !== "all") {
+          return new Response("Invalid environment", {
+            status: 400,
+            headers: corsHeaders
+          });
+        }
+      }
+      let trafficMode: "production" | "test" | "all" = "production";
+      if (trafficParam.trim()) {
+        const normalizedTraffic = String(trafficParam)
+          .trim()
+          .toLowerCase();
+        if (
+          normalizedTraffic === "production" ||
+          normalizedTraffic === "test" ||
+          normalizedTraffic === "all"
+        ) {
+          trafficMode = normalizedTraffic;
+        } else {
+          return new Response("Invalid traffic", {
+            status: 400,
+            headers: corsHeaders
+          });
+        }
+      } else if (
+        sourceEnvironmentFilter &&
+        sourceEnvironmentFilter !== "production"
+      ) {
+        // Non-production env slices are typically test traffic; show them without
+        // requiring an explicit traffic override.
+        trafficMode = "all";
       }
 
       const rangeDays = getRangeDays(range);
@@ -3037,6 +3378,12 @@ export default {
         } else {
           cacheUrl.searchParams.delete("source_host");
         }
+        if (sourceEnvironmentFilter) {
+          cacheUrl.searchParams.set("environment", sourceEnvironmentFilter);
+        } else {
+          cacheUrl.searchParams.delete("environment");
+        }
+        cacheUrl.searchParams.set("traffic", trafficMode);
         await applyAuthToCacheUrl(cacheUrl, auth);
         cacheKey = new Request(cacheUrl.toString(), { method: "GET" });
         const cached = await caches.default.match(cacheKey);
@@ -3072,12 +3419,16 @@ export default {
           cached: false,
           range,
           site,
-          sourceHost: sourceHostFilter || "all"
+          sourceHost: sourceHostFilter || "all",
+          sourceEnvironment: sourceEnvironmentFilter || "all",
+          traffic: trafficMode
         });
         const response = await buildStatsResponseFromAnalyticsEngine({
           env,
           site,
           sourceHostFilter: sourceHostFilter || undefined,
+          sourceEnvironmentFilter: sourceEnvironmentFilter || undefined,
+          trafficMode,
           range,
           dates,
           requestHost: url.hostname,

@@ -51,6 +51,7 @@ test("records generic event payload in analytics blobs", async () => {
   expect(eventWrite.blobs[6]).toBe("submit");
   expect(eventWrite.blobs[7]).toBe("db_contact_form_submit_success");
   expect(eventWrite.blobs[15]).toBe("dave-blake.com");
+  expect(eventWrite.blobs[16]).toBe("production");
   expect(eventWrite.blobs[17]).toBe("desktop");
   expect(eventWrite.blobs[18]).toBe("internal");
 
@@ -59,6 +60,54 @@ test("records generic event payload in analytics blobs", async () => {
   expect(context.custom.event_name).toBe("db_contact_form_submit_success");
   expect(context.custom.event_type).toBe("submit");
   expect(context.custom.session_id).toBe("mfs_abc123456");
+});
+
+test("dedupes repeated event_id within dedupe window", async () => {
+  const writes: any[] = [];
+  const payload = {
+    event_schema_version: "event_v1",
+    site: "dave-blake.com",
+    vendor: "dave-blake",
+    event_name: "db_cta_click",
+    event_type: "click",
+    page: "models-index",
+    session_id: "mfs_dedupe_123456",
+    event_id: "evt_dedupe_abc123",
+    custom_context: {
+      funnel_step: "models_page_cta_click",
+      cta_id: "hero_rates"
+    },
+    url: "https://dave-blake.com/models/"
+  };
+
+  const req1 = new Request("https://example.com/event", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.51",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+    },
+    body: JSON.stringify(payload)
+  });
+  const req2 = new Request("https://example.com/event", {
+    method: "POST",
+    headers: {
+      Origin: "https://dave-blake.com",
+      "Content-Type": "application/json",
+      "cf-connecting-ip": "203.0.113.51",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const first = await worker.fetch(req1, makeEnv(writes));
+  const second = await worker.fetch(req2, makeEnv(writes));
+
+  expect(first.status).toBe(204);
+  expect(second.status).toBe(202);
+  expect(second.headers.get("X-Event-Deduped")).toBe("1");
+  expect(writes.filter(point => point?.blobs?.[0] === "event").length).toBe(1);
 });
 
 test("returns CORS headers on /event preflight", async () => {

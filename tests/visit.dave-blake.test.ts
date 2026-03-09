@@ -47,7 +47,7 @@ test("records city, agency_slug, and page_type in analytics blobs", async () => 
   expect(viewEvent.blobs[13]).toBe("viviens-brisbane");
   expect(viewEvent.blobs[14]).toBe("agency-rates");
   expect(viewEvent.blobs[15]).toBe("dave-blake.com");
-  expect(viewEvent.blobs[16]).toBe("");
+  expect(viewEvent.blobs[16]).toBe("production");
   expect(viewEvent.blobs[17]).toBe("desktop");
   expect(viewEvent.blobs[18]).toBe("internal");
   const viewContext = JSON.parse(viewEvent.blobs[19]);
@@ -87,6 +87,7 @@ test("records localhost source context and mobile device class", async () => {
   const viewEvent = analyticsWrites.find(point => point?.blobs?.[0] === "view");
   expect(viewEvent).toBeTruthy();
   expect(viewEvent.blobs[15]).toBe("localhost");
+  expect(viewEvent.blobs[16]).toBe("local");
   expect(viewEvent.blobs[17]).toBe("mobile");
   expect(viewEvent.blobs[18]).toBe("direct");
   const viewContext = JSON.parse(viewEvent.blobs[19]);
