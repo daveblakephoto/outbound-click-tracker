@@ -696,16 +696,25 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const eventByNavArea: Record<string, number> = {};
   const eventByAccessOutcome: Record<string, number> = {};
   const eventByTestTraffic: Record<string, number> = {};
+  const leadByType: Record<string, number> = {};
+  const leadEstimatedValueByType: Record<string, number> = {};
+  const leadBySourcePageType: Record<string, number> = {};
+  const leadBySourcePageSlug: Record<string, number> = {};
   const sourceHostByTotal: Record<string, number> = {};
   const sourceHostByType: Record<string, Record<string, number>> = {};
   const sourceEnvironmentByTotal: Record<string, number> = {};
   const sourceEnvironmentByType: Record<string, Record<string, number>> = {};
+  const referralAttemptByAgency: Record<string, number> = {};
+  const referralSuccessByAgency: Record<string, number> = {};
   const eventErrorsByType: Record<string, number> = {};
   const eventErrorsByClass: Record<string, number> = {};
   const eventErrorsByField: Record<string, number> = {};
   const eventSessionByName: Record<string, Set<string>> = {};
   const eventSessionByFunnelStep: Record<string, Set<string>> = {};
   const eventSessionByAccessOutcome: Record<string, Set<string>> = {};
+  const leadSessionByType: Record<string, Set<string>> = {};
+  const referralAttemptSessionByAgency: Record<string, Set<string>> = {};
+  const referralSuccessSessionByAgency: Record<string, Set<string>> = {};
   const eventSessionDailyByName: Record<string, Record<string, Set<string>>> = {};
   const eventSessionTotal = new Set<string>();
   const sessionAttribution: Record<
@@ -721,9 +730,22 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   > = {};
   const conversionEventNames = new Set([
     "db_contact_form_submit_success",
+    "db_model_form_submit_success",
     "db_contact_email_click",
     "db_contact_phone_click"
   ]);
+  const leadEventNames = new Set([
+    "db_contact_form_submit_success",
+    "db_model_form_submit_success",
+    "db_contact_email_click",
+    "db_contact_phone_click"
+  ]);
+  const leadValueEstimateByType: Record<string, number> = {
+    model_test: 350,
+    portfolio_session: 540,
+    agency_submission: 700,
+    commercial_client: 900
+  };
 
   const toMetricValue = (value: unknown) => {
     const normalized = String(value || "")
@@ -771,6 +793,140 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     if (!candidate || candidate.length > 128) return "";
     if (!SESSION_ID_REGEX.test(candidate)) return "";
     return candidate;
+  };
+
+  const normalizePathMetric = (value: unknown) => {
+    const raw = String(value || "")
+      .trim()
+      .toLowerCase();
+    if (!raw) return "";
+    let withoutOrigin = raw.replace(/^https?:\/\/[^/]+/, "");
+    withoutOrigin = withoutOrigin.split("?")[0].split("#")[0];
+    if (!withoutOrigin) return "";
+    if (!withoutOrigin.startsWith("/")) {
+      withoutOrigin = `/${withoutOrigin}`;
+    }
+    if (withoutOrigin.length > 1 && withoutOrigin.endsWith("/")) {
+      withoutOrigin = withoutOrigin.slice(0, -1);
+    }
+    return withoutOrigin.slice(0, 180);
+  };
+
+  const inferPageTypeFromPath = (path: string) => {
+    if (!path || path === "/") return "home";
+    if (path === "/contact" || path.startsWith("/contact/")) return "contact";
+    if (path === "/about" || path.startsWith("/about/")) return "about";
+    if (path === "/services" || path.startsWith("/services/")) return "service";
+    if (path === "/articles" || path.startsWith("/articles/")) return "article";
+    if (path === "/portfolio" || path.startsWith("/portfolio/")) return "portfolio";
+    if (path === "/models" || path.startsWith("/models/")) return "models";
+    if (path.includes("agency-rates")) return "agency-rates";
+    return "page";
+  };
+
+  const inferPageSlugFromPath = (path: string) => {
+    if (!path || path === "/") return "home";
+    const segments = path
+      .split("/")
+      .filter(Boolean)
+      .slice(0, 2);
+    if (!segments.length) return "";
+    return toMetricValue(segments.join("-"));
+  };
+
+  const normalizeAgencyToken = (value: unknown) => {
+    const raw = String(value || "")
+      .trim()
+      .toLowerCase();
+    if (!raw) return "";
+    const withoutUrl = raw
+      .replace(/^https?:\/\//, "")
+      .replace(/^www\./, "")
+      .split(/[/?#]/)[0];
+    const cleaned = withoutUrl
+      .replace(/[_-]+/g, " ")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleaned) return "";
+    if (
+      cleaned === "none" ||
+      cleaned === "n a" ||
+      cleaned === "na" ||
+      cleaned === "not provided" ||
+      cleaned === "unknown" ||
+      cleaned === "independent" ||
+      cleaned === "self represented" ||
+      cleaned === "self-represented"
+    ) {
+      return "";
+    }
+    if (cleaned.includes("lost and found") || cleaned.includes("lostandfound")) {
+      return "lostandfound";
+    }
+    if (cleaned.includes("silver fox")) return "silver_fox";
+    if (cleaned.includes("vivien")) return "viviens";
+    if (cleaned.includes("chic")) return "chic";
+    if (cleaned.includes("ghost")) return "ghost";
+    if (cleaned.includes("que")) return "que";
+    if (cleaned.includes("kult")) return "kult";
+    if (cleaned.includes("priscilla")) return "priscillas";
+    return cleaned
+      .split(" ")
+      .slice(0, 4)
+      .join("_")
+      .slice(0, 64);
+  };
+
+  const resolveReferralAgency = ({
+    agencySlug,
+    referralSource,
+    representation
+  }: {
+    agencySlug: string;
+    referralSource: string;
+    representation: string;
+  }) => {
+    return (
+      normalizeAgencyToken(agencySlug) ||
+      normalizeAgencyToken(referralSource) ||
+      normalizeAgencyToken(representation)
+    );
+  };
+
+  const inferLeadType = ({
+    eventName,
+    page,
+    pageType,
+    pagePath
+  }: {
+    eventName: string;
+    page: string;
+    pageType: string;
+    pagePath: string;
+  }) => {
+    if (!leadEventNames.has(eventName)) return "";
+    const normalizedPage = toMetricValue(page);
+    const normalizedPageType = toMetricValue(pageType);
+    const normalizedPath = normalizePathMetric(pagePath);
+
+    const isModels =
+      normalizedPageType === "models" ||
+      normalizedPath.startsWith("/models") ||
+      normalizedPage.startsWith("models");
+    const isAgency =
+      normalizedPageType === "agency-rates" ||
+      normalizedPath.includes("agency-rates") ||
+      normalizedPage.includes("agency-rates");
+    const isPortfolio =
+      normalizedPageType === "portfolio" ||
+      normalizedPath.startsWith("/portfolio/") ||
+      normalizedPage.startsWith("portfolio");
+
+    if (isAgency) return "agency_submission";
+    if (isPortfolio) return "portfolio_session";
+    if (isModels) return "model_test";
+    return "commercial_client";
   };
 
   const classifyErrorClass = ({
@@ -1015,6 +1171,34 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     const navArea = toMetricValue(custom.nav_area ?? custom.navArea);
     const pathway = toMetricValue(custom.pathway);
     const timeline = toMetricValue(custom.timeline);
+    const pagePath = normalizePathMetric(
+      custom.page_path ??
+        custom.pagePath ??
+        custom.source_path ??
+        custom.sourcePath
+    );
+    const sourcePageType =
+      toMetricValue(custom.page_type ?? custom.pageType) ||
+      inferPageTypeFromPath(pagePath) ||
+      "unknown";
+    const sourcePageSlug =
+      toMetricValue(custom.source_page_slug ?? custom.sourcePageSlug) ||
+      inferPageSlugFromPath(pagePath) ||
+      page ||
+      "unknown";
+    const referralSource = toMetricValue(
+      custom.referral_source ?? custom.referralSource
+    );
+    const representation = toMetricValue(
+      custom.representation ??
+        custom.represented_by ??
+        custom.representedBy
+    );
+    const referralAgency = resolveReferralAgency({
+      agencySlug: toMetricValue(custom.agency_slug ?? custom.agencySlug),
+      referralSource,
+      representation
+    });
     const accessOutcome = toMetricValue(custom.access_outcome ?? custom.accessOutcome);
     const errorType = toMetricValue(custom.error_type ?? custom.errorType);
     const fieldName = toMetricValue(custom.field_name ?? custom.fieldName);
@@ -1060,12 +1244,58 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     addMetric(eventErrorsByClass, errorClass, count);
     addMetric(eventErrorsByField, fieldName, count);
 
+    const leadType = inferLeadType({
+      eventName,
+      page,
+      pageType: sourcePageType,
+      pagePath
+    });
+    if (leadType) {
+      addMetric(leadByType, leadType, count);
+      addMetric(
+        leadEstimatedValueByType,
+        leadType,
+        count * (leadValueEstimateByType[leadType] || 0)
+      );
+      addMetric(leadBySourcePageType, sourcePageType || "unknown", count);
+      addMetric(leadBySourcePageSlug, sourcePageSlug || "unknown", count);
+    }
+    if (eventName === "db_contact_form_submit_attempt") {
+      addMetric(referralAttemptByAgency, referralAgency || "unknown", count);
+    }
+    if (
+      eventName === "db_contact_form_submit_success" ||
+      eventName === "db_model_form_submit_success"
+    ) {
+      addMetric(referralSuccessByAgency, referralAgency || "unknown", count);
+    }
+
     if (sessionId) {
       eventSessionTotal.add(sessionId);
       addSessionMetric(eventSessionByName, eventName, sessionId);
       addSessionMetric(eventSessionByFunnelStep, funnelStep, sessionId);
       addSessionMetric(eventSessionByAccessOutcome, accessOutcome, sessionId);
       addSessionDailyMetric(eventSessionDailyByName, eventName, date, sessionId);
+      if (leadType) {
+        addSessionMetric(leadSessionByType, leadType, sessionId);
+      }
+      if (eventName === "db_contact_form_submit_attempt") {
+        addSessionMetric(
+          referralAttemptSessionByAgency,
+          referralAgency || "unknown",
+          sessionId
+        );
+      }
+      if (
+        eventName === "db_contact_form_submit_success" ||
+        eventName === "db_model_form_submit_success"
+      ) {
+        addSessionMetric(
+          referralSuccessSessionByAgency,
+          referralAgency || "unknown",
+          sessionId
+        );
+      }
 
       const firstTouchSource = toMetricValue(
         custom.first_touch_source ?? custom.firstTouchSource
@@ -1308,6 +1538,49 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     date,
     total: dailyUniqueViews[date] || 0
   }));
+  const leadEstimatedValueTotal = Object.values(leadEstimatedValueByType).reduce(
+    (sum, value) => sum + value,
+    0
+  );
+  const leadTotal = Object.values(leadByType).reduce((sum, value) => sum + value, 0);
+  const referralAgencyKeys = Array.from(
+    new Set([
+      ...Object.keys(referralAttemptByAgency),
+      ...Object.keys(referralSuccessByAgency)
+    ])
+  );
+  const referralAgencyRows = referralAgencyKeys
+    .map(agency => {
+      const attempts = referralAttemptByAgency[agency] || 0;
+      const successes = referralSuccessByAgency[agency] || 0;
+      const attemptSessions = referralAttemptSessionByAgency[agency]?.size || 0;
+      const successSessions = referralSuccessSessionByAgency[agency]?.size || 0;
+      return {
+        agency,
+        attempts,
+        successes,
+        conversionRate: attempts > 0 ? (successes / attempts) * 100 : 0,
+        attemptSessions,
+        successSessions,
+        sessionConversionRate:
+          attemptSessions > 0 ? (successSessions / attemptSessions) * 100 : 0
+      };
+    })
+    .sort((a, b) => b.attempts - a.attempts);
+  const referralAttemptTotal = Object.values(referralAttemptByAgency).reduce(
+    (sum, value) => sum + value,
+    0
+  );
+  const referralSuccessTotal = Object.values(referralSuccessByAgency).reduce(
+    (sum, value) => sum + value,
+    0
+  );
+  const referralAttemptSessionTotal = Object.values(
+    referralAttemptSessionByAgency
+  ).reduce((sum, sessions) => sum + sessions.size, 0);
+  const referralSuccessSessionTotal = Object.values(
+    referralSuccessSessionByAgency
+  ).reduce((sum, sessions) => sum + sessions.size, 0);
 
   const payload: Record<string, unknown> = {
     site,
@@ -1369,6 +1642,34 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         .sort((a, b) => b.total - a.total),
       byTestTraffic: toBreakdown(eventByTestTraffic, "trafficType"),
       byAccessOutcome: toBreakdown(eventByAccessOutcome, "accessOutcome"),
+      leads: {
+        total: leadTotal,
+        estimatedValueTotal: leadEstimatedValueTotal,
+        byType: toBreakdown(leadByType, "leadType"),
+        estimatedValueByType: Object.entries(leadEstimatedValueByType)
+          .map(([leadType, estimatedValue]) => ({ leadType, estimatedValue }))
+          .sort((a, b) => b.estimatedValue - a.estimatedValue),
+        bySourcePageType: toBreakdown(leadBySourcePageType, "sourcePageType"),
+        bySourcePageSlug: toBreakdown(leadBySourcePageSlug, "sourcePageSlug"),
+        sessionsByType: toSessionBreakdown(leadSessionByType, "leadType")
+      },
+      referralAgencies: {
+        totals: {
+          attempts: referralAttemptTotal,
+          successes: referralSuccessTotal,
+          conversionRate:
+            referralAttemptTotal > 0
+              ? (referralSuccessTotal / referralAttemptTotal) * 100
+              : 0,
+          attemptSessions: referralAttemptSessionTotal,
+          successSessions: referralSuccessSessionTotal,
+          sessionConversionRate:
+            referralAttemptSessionTotal > 0
+              ? (referralSuccessSessionTotal / referralAttemptSessionTotal) * 100
+              : 0
+        },
+        byAgency: referralAgencyRows
+      },
       errors: {
         byType: toBreakdown(eventErrorsByType, "errorType"),
         byClass: toBreakdown(eventErrorsByClass, "errorClass"),

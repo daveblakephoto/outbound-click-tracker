@@ -105,6 +105,52 @@ test("includes event funnel breakdown when event rows exist", async () => {
                 vendor: "dave-blake",
                 page: "models-contact",
                 event_type: "submit",
+                event_name: "db_contact_form_submit_attempt",
+                date: today,
+                event_context: JSON.stringify({
+                  custom: {
+                    funnel_step: "submit_attempt",
+                    pathway: "represented",
+                    timeline: "1-3-months",
+                    referral_source: "Viviens Brisbane",
+                    representation: "Viviens",
+                    session_id: "sess_attr_2",
+                    first_touch_source: "google",
+                    last_touch_source: "google",
+                    first_touch_landing_page: "/models/contact",
+                    first_touch_utm_source: "google",
+                    event_ts_client: `${today}T07:50:00.000Z`
+                  }
+                }),
+                count: 4
+              },
+              {
+                vendor: "dave-blake",
+                page: "models-contact",
+                event_type: "submit",
+                event_name: "db_contact_form_submit_success",
+                date: today,
+                event_context: JSON.stringify({
+                  custom: {
+                    funnel_step: "submit_success",
+                    pathway: "represented",
+                    timeline: "1-3-months",
+                    referral_source: "Viviens Brisbane",
+                    representation: "Viviens",
+                    session_id: "sess_attr_2",
+                    first_touch_source: "google",
+                    last_touch_source: "google",
+                    first_touch_landing_page: "/models/contact",
+                    first_touch_utm_source: "google",
+                    event_ts_client: `${today}T08:20:00.000Z`
+                  }
+                }),
+                count: 2
+              },
+              {
+                vendor: "dave-blake",
+                page: "models-contact",
+                event_type: "submit",
                 event_name: "db_contact_form_submit_success",
                 date: today,
                 event_context: JSON.stringify({
@@ -255,11 +301,11 @@ test("includes event funnel breakdown when event rows exist", async () => {
 
   expect(response.status).toBe(200);
   const json = await response.json();
-  expect(json.events.total).toBe(10);
+  expect(json.events.total).toBe(16);
   expect(
     json.events.byName.some(
       (row: any) =>
-        row.eventName === "db_contact_form_submit_success" && row.count === 3
+        row.eventName === "db_contact_form_submit_success" && row.count === 5
     )
   ).toBe(true);
   expect(
@@ -317,7 +363,23 @@ test("includes event funnel breakdown when event rows exist", async () => {
       (row: any) => row.source === "direct" && row.count === 1
     )
   ).toBe(true);
-  expect(json.events.attribution.sessionsWithConversion).toBe(1);
+  expect(json.events.attribution.sessionsWithConversion).toBe(2);
+  expect(json.events.leads.total).toBe(5);
+  expect(
+    json.events.leads.byType.some(
+      (row: any) => row.leadType === "model_test" && row.count === 5
+    )
+  ).toBe(true);
+  expect(json.events.referralAgencies.totals.attempts).toBe(4);
+  expect(json.events.referralAgencies.totals.successes).toBe(5);
+  expect(
+    json.events.referralAgencies.byAgency.some(
+      (row: any) =>
+        row.agency === "viviens" &&
+        row.attempts === 4 &&
+        row.successes === 2
+    )
+  ).toBe(true);
 });
 
 test("clamps unique views to total views", async () => {
