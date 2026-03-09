@@ -691,6 +691,9 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const eventBySourcePath: Record<string, number> = {};
   const eventByTargetDomain: Record<string, number> = {};
   const eventByOutboundKind: Record<string, number> = {};
+  const eventByScrollDepth: Record<string, number> = {};
+  const eventByEngagedTimeSeconds: Record<string, number> = {};
+  const eventByNavArea: Record<string, number> = {};
   const eventByAccessOutcome: Record<string, number> = {};
   const eventByTestTraffic: Record<string, number> = {};
   const sourceHostByTotal: Record<string, number> = {};
@@ -705,6 +708,22 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const eventSessionByAccessOutcome: Record<string, Set<string>> = {};
   const eventSessionDailyByName: Record<string, Record<string, Set<string>>> = {};
   const eventSessionTotal = new Set<string>();
+  const sessionAttribution: Record<
+    string,
+    {
+      firstTouchSource: string;
+      lastTouchSource: string;
+      firstTouchLandingPage: string;
+      firstTouchUtmSource: string;
+      lastEventTs: string;
+      hasConversion: boolean;
+    }
+  > = {};
+  const conversionEventNames = new Set([
+    "db_contact_form_submit_success",
+    "db_contact_email_click",
+    "db_contact_phone_click"
+  ]);
 
   const toMetricValue = (value: unknown) => {
     const normalized = String(value || "")
@@ -987,6 +1006,13 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     const sourcePath = toMetricValue(custom.source_path ?? custom.sourcePath);
     const targetDomain = toMetricValue(custom.target_domain ?? custom.targetDomain);
     const outboundKind = toMetricValue(custom.outbound_kind ?? custom.outboundKind);
+    const scrollDepth = toMetricValue(
+      custom.scroll_depth_pct ?? custom.scrollDepthPct
+    );
+    const engagedTimeSeconds = toMetricValue(
+      custom.engaged_time_seconds ?? custom.engagedTimeSeconds
+    );
+    const navArea = toMetricValue(custom.nav_area ?? custom.navArea);
     const pathway = toMetricValue(custom.pathway);
     const timeline = toMetricValue(custom.timeline);
     const accessOutcome = toMetricValue(custom.access_outcome ?? custom.accessOutcome);
@@ -1023,6 +1049,9 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     addMetric(eventBySourcePath, sourcePath, count);
     addMetric(eventByTargetDomain, targetDomain, count);
     addMetric(eventByOutboundKind, outboundKind, count);
+    addMetric(eventByScrollDepth, scrollDepth, count);
+    addMetric(eventByEngagedTimeSeconds, engagedTimeSeconds, count);
+    addMetric(eventByNavArea, navArea, count);
     addMetric(eventByPathway, pathway, count);
     addMetric(eventByTimeline, timeline, count);
     addMetric(eventByAccessOutcome, accessOutcome, count);
@@ -1037,6 +1066,59 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       addSessionMetric(eventSessionByFunnelStep, funnelStep, sessionId);
       addSessionMetric(eventSessionByAccessOutcome, accessOutcome, sessionId);
       addSessionDailyMetric(eventSessionDailyByName, eventName, date, sessionId);
+
+      const firstTouchSource = toMetricValue(
+        custom.first_touch_source ?? custom.firstTouchSource
+      );
+      const lastTouchSource = toMetricValue(
+        custom.last_touch_source ?? custom.lastTouchSource
+      );
+      const firstTouchLandingPage = toMetricValue(
+        custom.first_touch_landing_page ??
+          custom.firstTouchLandingPage ??
+          custom.landing_page
+      );
+      const firstTouchUtmSource = toMetricValue(
+        custom.first_touch_utm_source ??
+          custom.firstTouchUtmSource ??
+          custom.utm_source
+      );
+      const eventTsClientRaw = String(
+        custom.event_ts_client ?? custom.eventTsClient ?? ""
+      ).trim();
+      const eventTsClient =
+        eventTsClientRaw && eventTsClientRaw.length <= 40
+          ? eventTsClientRaw
+          : `${date}T00:00:00.000Z`;
+      if (!sessionAttribution[sessionId]) {
+        sessionAttribution[sessionId] = {
+          firstTouchSource: "",
+          lastTouchSource: "",
+          firstTouchLandingPage: "",
+          firstTouchUtmSource: "",
+          lastEventTs: "",
+          hasConversion: false
+        };
+      }
+      const attribution = sessionAttribution[sessionId];
+      if (!attribution.firstTouchSource && firstTouchSource) {
+        attribution.firstTouchSource = firstTouchSource;
+      }
+      if (!attribution.firstTouchLandingPage && firstTouchLandingPage) {
+        attribution.firstTouchLandingPage = firstTouchLandingPage;
+      }
+      if (!attribution.firstTouchUtmSource && firstTouchUtmSource) {
+        attribution.firstTouchUtmSource = firstTouchUtmSource;
+      }
+      if (eventTsClient >= attribution.lastEventTs) {
+        attribution.lastEventTs = eventTsClient;
+        if (lastTouchSource) {
+          attribution.lastTouchSource = lastTouchSource;
+        }
+      }
+      if (conversionEventNames.has(eventName)) {
+        attribution.hasConversion = true;
+      }
     }
   }
 
@@ -1073,6 +1155,55 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         }))
         .filter(entry => entry.sessions > 0)
   );
+  const attributionByFirstTouchSource: Record<string, number> = {};
+  const attributionByLastTouchSource: Record<string, number> = {};
+  const attributionByFirstTouchLandingPage: Record<string, number> = {};
+  const attributionByFirstTouchUtmSource: Record<string, number> = {};
+  const attributionByFirstTouchSourceConversion: Record<string, number> = {};
+  const attributionByLastTouchSourceConversion: Record<string, number> = {};
+  let attributionSessionsWithConversion = 0;
+
+  const normalizeAttributionValue = (
+    value: string,
+    fallback: string
+  ) => {
+    const normalized = toMetricValue(value);
+    return normalized || fallback;
+  };
+
+  for (const attribution of Object.values(sessionAttribution)) {
+    const firstTouchSource = normalizeAttributionValue(
+      attribution.firstTouchSource,
+      "unknown"
+    );
+    const lastTouchSource = normalizeAttributionValue(
+      attribution.lastTouchSource,
+      firstTouchSource || "unknown"
+    );
+    const firstTouchLandingPage = normalizeAttributionValue(
+      attribution.firstTouchLandingPage,
+      "unknown"
+    );
+    const firstTouchUtmSource = normalizeAttributionValue(
+      attribution.firstTouchUtmSource,
+      "none"
+    );
+
+    addMetric(attributionByFirstTouchSource, firstTouchSource, 1);
+    addMetric(attributionByLastTouchSource, lastTouchSource, 1);
+    addMetric(attributionByFirstTouchLandingPage, firstTouchLandingPage, 1);
+    addMetric(attributionByFirstTouchUtmSource, firstTouchUtmSource, 1);
+
+    if (attribution.hasConversion) {
+      attributionSessionsWithConversion += 1;
+      addMetric(
+        attributionByFirstTouchSourceConversion,
+        firstTouchSource,
+        1
+      );
+      addMetric(attributionByLastTouchSourceConversion, lastTouchSource, 1);
+    }
+  }
 
   const vendorsSet = new Set([
     ...Object.keys(vendorAgg),
@@ -1205,6 +1336,12 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       bySourcePath: toBreakdown(eventBySourcePath, "sourcePath"),
       byTargetDomain: toBreakdown(eventByTargetDomain, "targetDomain"),
       byOutboundKind: toBreakdown(eventByOutboundKind, "outboundKind"),
+      byScrollDepth: toBreakdown(eventByScrollDepth, "scrollDepth"),
+      byEngagedTimeSeconds: toBreakdown(
+        eventByEngagedTimeSeconds,
+        "engagedTimeSeconds"
+      ),
+      byNavArea: toBreakdown(eventByNavArea, "navArea"),
       bySourceHost: toBreakdown(sourceHostByTotal, "sourceHost"),
       bySourceEnvironment: toBreakdown(
         sourceEnvironmentByTotal,
@@ -1251,6 +1388,31 @@ const buildStatsResponseFromAnalyticsEngine = async ({
           "accessOutcome"
         ),
         dailyByName: eventSessionDailyByNameRows
+      },
+      attribution: {
+        sessionsTotal: Object.keys(sessionAttribution).length,
+        sessionsWithConversion: attributionSessionsWithConversion,
+        byFirstTouchSource: toBreakdown(
+          attributionByFirstTouchSource,
+          "source"
+        ),
+        byLastTouchSource: toBreakdown(attributionByLastTouchSource, "source"),
+        byFirstTouchLandingPage: toBreakdown(
+          attributionByFirstTouchLandingPage,
+          "landingPage"
+        ),
+        byFirstTouchUtmSource: toBreakdown(
+          attributionByFirstTouchUtmSource,
+          "utmSource"
+        ),
+        byFirstTouchSourceConversion: toBreakdown(
+          attributionByFirstTouchSourceConversion,
+          "source"
+        ),
+        byLastTouchSourceConversion: toBreakdown(
+          attributionByLastTouchSourceConversion,
+          "source"
+        )
       }
     }
   };

@@ -111,7 +111,13 @@ test("includes event funnel breakdown when event rows exist", async () => {
                   custom: {
                     funnel_step: "submit_success",
                     pathway: "aspiring",
-                    timeline: "2-4-weeks"
+                    timeline: "2-4-weeks",
+                    session_id: "sess_attr_1",
+                    first_touch_source: "instagram",
+                    last_touch_source: "direct",
+                    first_touch_landing_page: "/models",
+                    first_touch_utm_source: "instagram",
+                    event_ts_client: `${today}T08:00:00.000Z`
                   }
                 }),
                 count: 3
@@ -126,7 +132,13 @@ test("includes event funnel breakdown when event rows exist", async () => {
                   custom: {
                     funnel_step: "submit_error",
                     error_type: "client_validation",
-                    field_name: "age"
+                    field_name: "age",
+                    session_id: "sess_attr_1",
+                    first_touch_source: "instagram",
+                    last_touch_source: "direct",
+                    first_touch_landing_page: "/models",
+                    first_touch_utm_source: "instagram",
+                    event_ts_client: `${today}T08:05:00.000Z`
                   }
                 }),
                 count: 2
@@ -145,6 +157,66 @@ test("includes event funnel breakdown when event rows exist", async () => {
                   }
                 }),
                 count: 1
+              },
+              {
+                vendor: "dave-blake",
+                page: "articles",
+                event_type: "custom",
+                event_name: "db_scroll_depth",
+                date: today,
+                event_context: JSON.stringify({
+                  custom: {
+                    funnel_step: "scroll_depth",
+                    scroll_depth_pct: 50,
+                    session_id: "sess_attr_1",
+                    first_touch_source: "instagram",
+                    last_touch_source: "direct",
+                    first_touch_landing_page: "/models",
+                    first_touch_utm_source: "instagram",
+                    event_ts_client: `${today}T08:10:00.000Z`
+                  }
+                }),
+                count: 1
+              },
+              {
+                vendor: "dave-blake",
+                page: "articles",
+                event_type: "custom",
+                event_name: "db_engaged_time",
+                date: today,
+                event_context: JSON.stringify({
+                  custom: {
+                    funnel_step: "engaged_time",
+                    engaged_time_seconds: 30,
+                    session_id: "sess_attr_1",
+                    first_touch_source: "instagram",
+                    last_touch_source: "direct",
+                    first_touch_landing_page: "/models",
+                    first_touch_utm_source: "instagram",
+                    event_ts_client: `${today}T08:12:00.000Z`
+                  }
+                }),
+                count: 1
+              },
+              {
+                vendor: "dave-blake",
+                page: "articles",
+                event_type: "click",
+                event_name: "db_nav_click",
+                date: today,
+                event_context: JSON.stringify({
+                  custom: {
+                    funnel_step: "nav_click",
+                    nav_area: "header_nav",
+                    session_id: "sess_attr_1",
+                    first_touch_source: "instagram",
+                    last_touch_source: "direct",
+                    first_touch_landing_page: "/models",
+                    first_touch_utm_source: "instagram",
+                    event_ts_client: `${today}T08:15:00.000Z`
+                  }
+                }),
+                count: 2
               }
             ]
           })
@@ -183,7 +255,7 @@ test("includes event funnel breakdown when event rows exist", async () => {
 
   expect(response.status).toBe(200);
   const json = await response.json();
-  expect(json.events.total).toBe(6);
+  expect(json.events.total).toBe(10);
   expect(
     json.events.byName.some(
       (row: any) =>
@@ -220,6 +292,32 @@ test("includes event funnel breakdown when event rows exist", async () => {
       (row: any) => row.outboundKind === "external" && row.count === 1
     )
   ).toBe(true);
+  expect(
+    json.events.byScrollDepth.some(
+      (row: any) => row.scrollDepth === "50" && row.count === 1
+    )
+  ).toBe(true);
+  expect(
+    json.events.byEngagedTimeSeconds.some(
+      (row: any) => row.engagedTimeSeconds === "30" && row.count === 1
+    )
+  ).toBe(true);
+  expect(
+    json.events.byNavArea.some(
+      (row: any) => row.navArea === "header_nav" && row.count === 2
+    )
+  ).toBe(true);
+  expect(
+    json.events.attribution.byFirstTouchSource.some(
+      (row: any) => row.source === "instagram" && row.count === 1
+    )
+  ).toBe(true);
+  expect(
+    json.events.attribution.byLastTouchSource.some(
+      (row: any) => row.source === "direct" && row.count === 1
+    )
+  ).toBe(true);
+  expect(json.events.attribution.sessionsWithConversion).toBe(1);
 });
 
 test("clamps unique views to total views", async () => {
