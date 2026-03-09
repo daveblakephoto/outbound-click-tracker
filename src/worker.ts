@@ -424,6 +424,7 @@ const analyticsEngineQuery = async (
 const buildStatsResponseFromAnalyticsEngine = async ({
   env,
   site,
+  sourceHostFilter,
   range,
   dates,
   requestHost,
@@ -435,6 +436,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
 }: {
   env: any;
   site: string;
+  sourceHostFilter?: string;
   range: string;
   dates: string[];
   requestHost?: string;
@@ -449,9 +451,14 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const endDate = dates[dates.length - 1];
   const siteEnvironment = inferSiteEnvironment(site);
   const endpointHost = normalizeHostname(requestHost || "");
+  const sourceHostWhere = sourceHostFilter
+    ? sourceHostFilter === "unknown"
+      ? " AND blob16 = ''"
+      : ` AND blob16 = ${sqlString(sourceHostFilter)}`
+    : "";
   const baseWhere = `WHERE blob2 = ${sqlString(site)} AND blob11 >= ${sqlString(
     startDate
-  )} AND blob11 <= ${sqlString(endDate)}`;
+  )} AND blob11 <= ${sqlString(endDate)}${sourceHostWhere}`;
 
   const timings: Record<string, number> = {};
   const timedQuery = async (label: string, sql: string) => {
@@ -964,6 +971,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const payload: Record<string, unknown> = {
     site,
     environment: siteEnvironment,
+    sourceHostFilter: sourceHostFilter || "",
     endpointHost,
     range,
     contractVersion: CONTRACT_VERSION,
@@ -2946,6 +2954,7 @@ export default {
 
       const siteParam = url.searchParams.get("site");
       const range = url.searchParams.get("range") || "28d";
+      const sourceHostParam = url.searchParams.get("source_host") || "";
 
       if (!siteParam) {
         return new Response("Missing site", {
@@ -2959,6 +2968,23 @@ export default {
           status: 400,
           headers: corsHeaders
         });
+      }
+      let sourceHostFilter = "";
+      if (sourceHostParam.trim()) {
+        const normalizedSourceHost = normalizeHostname(sourceHostParam.trim());
+        if (normalizedSourceHost === "unknown") {
+          sourceHostFilter = "unknown";
+        } else if (
+          isSafeHostname(normalizedSourceHost) &&
+          normalizedSourceHost.length <= 253
+        ) {
+          sourceHostFilter = normalizedSourceHost;
+        } else {
+          return new Response("Invalid source_host", {
+            status: 400,
+            headers: corsHeaders
+          });
+        }
       }
 
       const rangeDays = getRangeDays(range);
@@ -3006,6 +3032,11 @@ export default {
         const cacheUrl = new URL(request.url);
         cacheUrl.searchParams.set("site", site);
         cacheUrl.searchParams.set("range", range);
+        if (sourceHostFilter) {
+          cacheUrl.searchParams.set("source_host", sourceHostFilter);
+        } else {
+          cacheUrl.searchParams.delete("source_host");
+        }
         await applyAuthToCacheUrl(cacheUrl, auth);
         cacheKey = new Request(cacheUrl.toString(), { method: "GET" });
         const cached = await caches.default.match(cacheKey);
@@ -3037,10 +3068,16 @@ export default {
       }
 
       try {
-        console.log("stats:ae", { cached: false, range, site });
+        console.log("stats:ae", {
+          cached: false,
+          range,
+          site,
+          sourceHost: sourceHostFilter || "all"
+        });
         const response = await buildStatsResponseFromAnalyticsEngine({
           env,
           site,
+          sourceHostFilter: sourceHostFilter || undefined,
           range,
           dates,
           requestHost: url.hostname,

@@ -359,6 +359,47 @@ test("rejects invalid range", async () => {
   expect(response.status).toBe(400);
 });
 
+test("rejects invalid source_host", async () => {
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d&source_host=bad host",
+    {
+      headers: { Authorization: "Bearer test-secret" }
+    }
+  );
+
+  const response = await worker.fetch(request, makeEnv());
+  expect(response.status).toBe(400);
+  expect(await response.text()).toBe("Invalid source_host");
+});
+
+test("applies source_host filter to analytics engine queries", async () => {
+  const sqlStatements: string[] = [];
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (_url, init) => {
+      sqlStatements.push(String(init?.body || ""));
+      return {
+        ok: true,
+        json: async () => ({ data: [] })
+      } as any;
+    }
+  );
+
+  const request = new Request(
+    "https://example.com/api/stats?site=StartMyLoveEngine&range=7d&source_host=staging.dave-blake.com",
+    {
+      headers: { Authorization: "Bearer test-secret" }
+    }
+  );
+
+  const response = await worker.fetch(request, makeEnv());
+  fetchSpy.mockRestore();
+
+  expect(response.status).toBe(200);
+  expect(
+    sqlStatements.some(sql => sql.includes("AND blob16 = 'staging.dave-blake.com'"))
+  ).toBe(true);
+});
+
 test("rejects range larger than 90d", async () => {
   const request = new Request(
     "https://example.com/api/stats?site=StartMyLoveEngine&range=180d",
