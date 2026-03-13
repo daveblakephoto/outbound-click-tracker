@@ -439,7 +439,7 @@ const resolveAnalyticsSite = (
   if (request) {
     try {
       const originHeader = request.headers.get("Origin") || "";
-      if (originHeader && VISIT_ALLOWED_ORIGINS.has(originHeader)) {
+      if (originHeader && isAllowedVisitOrigin(originHeader)) {
         const originHost = normalizeHostname(new URL(originHeader).hostname);
         const originSite = map[originHost] || "";
         if (originSite) return originSite;
@@ -2694,7 +2694,7 @@ const applyAuthToCacheUrl = async (
 
 const getVisitCorsHeaders = request => {
   const origin = request.headers.get("Origin");
-  const allowedOrigin = VISIT_ALLOWED_ORIGINS.has(origin)
+  const allowedOrigin = isAllowedVisitOrigin(origin)
     ? origin
     : "https://startmyloveengine.com";
 
@@ -2707,8 +2707,21 @@ const getVisitCorsHeaders = request => {
   };
 };
 
-const isAllowedClickOrigin = (origin: string | null) =>
-  Boolean(origin && VISIT_ALLOWED_ORIGINS.has(origin));
+const isAllowedDaveBlakeOrigin = (origin: string | null) => {
+  if (!origin) return false;
+  try {
+    const parsed = new URL(origin);
+    const host = normalizeHostname(parsed.hostname);
+    return parsed.protocol === "https:" && (host === "dave-blake.com" || host.endsWith(".dave-blake.com"));
+  } catch {
+    return false;
+  }
+};
+
+const isAllowedVisitOrigin = (origin: string | null) =>
+  Boolean(origin && (VISIT_ALLOWED_ORIGINS.has(origin) || isAllowedDaveBlakeOrigin(origin)));
+
+const isAllowedClickOrigin = (origin: string | null) => isAllowedVisitOrigin(origin);
 
 const isAllowedClickReferrer = (referrer: string | null) => {
   if (!referrer) return false;

@@ -65,6 +65,22 @@ test("POST click includes CORS headers", async () => {
   expect(response.headers.get("Access-Control-Allow-Credentials")).toBe("true");
 });
 
+test("POST click accepts preview subdomain origin", async () => {
+  const origin = "https://preview.dave-blake.com";
+  const env = {
+    CLICK_SIGNING_SECRET: "secret",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
+  } as any;
+
+  const response = await worker.fetch(
+    makePostRequest({}, { Origin: origin, Referer: `${origin}/portfolio/motion/` }),
+    env
+  );
+
+  expect(response.status).toBe(204);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+});
+
 test("POST click rejects missing parameters", async () => {
   const env = {
     CLICK_SIGNING_SECRET: "secret",
