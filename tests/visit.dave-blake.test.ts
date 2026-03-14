@@ -330,6 +330,22 @@ test("returns CORS headers for dave-blake.com origin on /visit preflight", async
   expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
 });
 
+test("returns CORS headers for main subdomain origin on /visit preflight", async () => {
+  const origin = "https://main.dave-blake.com";
+  const request = new Request("https://example.com/visit", {
+    method: "OPTIONS",
+    headers: {
+      Origin: origin,
+      "Access-Control-Request-Method": "POST"
+    }
+  });
+
+  const response = await worker.fetch(request, {} as any);
+
+  expect(response.status).toBe(204);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+});
+
 test("returns 503 when Analytics Engine binding is missing on /visit", async () => {
   const request = new Request("https://example.com/visit", {
     method: "POST",

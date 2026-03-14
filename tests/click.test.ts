@@ -81,6 +81,22 @@ test("POST click accepts preview subdomain origin", async () => {
   expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
 });
 
+test("POST click accepts main subdomain origin", async () => {
+  const origin = "https://main.dave-blake.com";
+  const env = {
+    CLICK_SIGNING_SECRET: "secret",
+    ANALYTICS_ENGINE: { writeDataPoint() {} }
+  } as any;
+
+  const response = await worker.fetch(
+    makePostRequest({}, { Origin: origin, Referer: `${origin}/portfolio/motion/` }),
+    env
+  );
+
+  expect(response.status).toBe(204);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+});
+
 test("POST click rejects missing parameters", async () => {
   const env = {
     CLICK_SIGNING_SECRET: "secret",

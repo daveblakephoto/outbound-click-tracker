@@ -19,6 +19,7 @@
     "startmyloveengine.com",
     "go.startmyloveengine.com",
     "dave-blake.com",
+    "main.dave-blake.com",
     "staging.dave-blake.com"
   ],
   "vendorSlugRegex": "^[a-z0-9-]+$",
@@ -29,6 +30,7 @@
       "https://www.startmyloveengine.com",
       "https://dave-blake.com",
       "https://www.dave-blake.com",
+      "https://main.dave-blake.com",
       "https://preview.dave-blake.com",
       "https://staging.dave-blake.com",
       "http://localhost:4321",
@@ -40,6 +42,7 @@
       "https://smle.mocha.app",
       "https://dave-blake.com",
       "https://www.dave-blake.com",
+      "https://main.dave-blake.com",
       "https://staging.dave-blake.com",
       "http://localhost:5500",
       "http://127.0.0.1:5500",

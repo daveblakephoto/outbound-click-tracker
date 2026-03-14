@@ -313,6 +313,24 @@ test("returns CORS headers on /event preflight for preview subdomain origin", as
   );
 });
 
+test("returns CORS headers on /event preflight for main subdomain origin", async () => {
+  const origin = "https://main.dave-blake.com";
+  const request = new Request("https://example.com/event", {
+    method: "OPTIONS",
+    headers: {
+      Origin: origin,
+      "Access-Control-Request-Method": "POST"
+    }
+  });
+
+  const response = await worker.fetch(request, {} as any);
+  expect(response.status).toBe(204);
+  expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+  expect(response.headers.get("Access-Control-Allow-Methods")).toBe(
+    "POST, OPTIONS"
+  );
+});
+
 test("rejects invalid event type", async () => {
   const request = new Request("https://example.com/event", {
     method: "POST",
