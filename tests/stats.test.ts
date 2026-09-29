@@ -107,6 +107,7 @@ test("includes event funnel breakdown when event rows exist", async () => {
                 event_type: "submit",
                 event_name: "db_contact_form_submit_attempt",
                 date: today,
+                event_environment: "production",
                 event_context: JSON.stringify({
                   custom: {
                     funnel_step: "submit_attempt",
@@ -130,6 +131,7 @@ test("includes event funnel breakdown when event rows exist", async () => {
                 event_type: "submit",
                 event_name: "db_contact_form_submit_success",
                 date: today,
+                event_environment: "production",
                 event_context: JSON.stringify({
                   custom: {
                     funnel_step: "submit_success",
@@ -153,6 +155,7 @@ test("includes event funnel breakdown when event rows exist", async () => {
                 event_type: "submit",
                 event_name: "db_contact_form_submit_success",
                 date: today,
+                event_environment: "production",
                 event_context: JSON.stringify({
                   custom: {
                     funnel_step: "submit_success",
@@ -174,6 +177,7 @@ test("includes event funnel breakdown when event rows exist", async () => {
                 event_type: "error",
                 event_name: "db_contact_form_submit_error",
                 date: today,
+                event_environment: "production",
                 event_context: JSON.stringify({
                   custom: {
                     funnel_step: "submit_error",
@@ -195,6 +199,7 @@ test("includes event funnel breakdown when event rows exist", async () => {
                 event_type: "click",
                 event_name: "db_outbound_click",
                 date: today,
+                event_environment: "production",
                 event_context: JSON.stringify({
                   custom: {
                     funnel_step: "outbound_click",
@@ -210,6 +215,7 @@ test("includes event funnel breakdown when event rows exist", async () => {
                 event_type: "custom",
                 event_name: "db_scroll_depth",
                 date: today,
+                event_environment: "production",
                 event_context: JSON.stringify({
                   custom: {
                     funnel_step: "scroll_depth",
@@ -230,6 +236,7 @@ test("includes event funnel breakdown when event rows exist", async () => {
                 event_type: "custom",
                 event_name: "db_engaged_time",
                 date: today,
+                event_environment: "production",
                 event_context: JSON.stringify({
                   custom: {
                     funnel_step: "engaged_time",
@@ -250,6 +257,7 @@ test("includes event funnel breakdown when event rows exist", async () => {
                 event_type: "click",
                 event_name: "db_nav_click",
                 date: today,
+                event_environment: "production",
                 event_context: JSON.stringify({
                   custom: {
                     funnel_step: "nav_click",
@@ -398,6 +406,7 @@ test("includes agency vendor contact click-through metrics", async () => {
                 event_type: "click",
                 event_name: "db_agency_rates_cta_click",
                 date: today,
+                event_environment: "production",
                 event_context: JSON.stringify({
                   custom: {
                     funnel_step: "agency_rates_cta_click",
@@ -415,6 +424,7 @@ test("includes agency vendor contact click-through metrics", async () => {
                 event_type: "click",
                 event_name: "db_agency_rates_cta_click",
                 date: today,
+                event_environment: "production",
                 event_context: JSON.stringify({
                   custom: {
                     funnel_step: "agency_rates_cta_click",
@@ -818,4 +828,325 @@ test("returns tier views from observed legacy tiers", async () => {
   expect(json.tierViews.featured).toBe(2);
   expect(json.tierViews.basic).toBe(0);
   expect(json.tierViews.unpaid).toBe(0);
+});
+
+test("aggregates verified leads, CTA clicks and funnel without counting test sessions", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const row = (event_name: string, session_id: string, custom: Record<string, unknown> = {}) => ({
+    vendor: "dave-blake",
+    page: event_name === "db_cta_click" ? "models-digitals" : "models-contact",
+    event_type: event_name.includes("error") ? "error" : "custom",
+    event_name,
+    date: today,
+    event_environment: "production",
+    event_context: JSON.stringify({ custom: { session_id, ...custom } }),
+    count: 1
+  });
+  const source = {
+    first_touch_source: "www.google.com",
+    first_touch_landing_page: "/models/digitals/?utm_source=ignored",
+    first_touch_utm_campaign: "spring"
+  };
+  const rows = [
+    row("db_cta_click", "session-a", { cta_id: "brisbane_digitals_hero_enquiry", ...source }),
+    row("db_cta_click", "session-a", { cta_id: "brisbane_digitals_hero_enquiry", ...source }),
+    row("db_contact_form_view", "session-a", source),
+    row("db_contact_form_start", "session-a", source),
+    row("db_contact_form_validation_error", "session-a", source),
+    row("db_contact_form_submit_error", "session-a", source),
+    row("db_contact_form_submit_success", "session-a", source),
+    row("db_contact_form_submit_success", "session-b", {
+      first_touch_source: "direct",
+      first_touch_landing_page: "/articles/top-modelling-agencies-in-brisbane-how-to-get-signed/"
+    }),
+    row("db_cta_click", "session-test", {
+      cta_id: "brisbane_digitals_hero_enquiry", is_test_traffic: "true"
+    }),
+    row("db_contact_form_submit_success", "session-test", {
+      ...source, is_test_traffic: "true"
+    }),
+    row("db_cta_click", "session-missing", { cta_id: "invalid CTA!" }),
+    row("db_contact_form_submit_success", "session-missing")
+  ];
+  const statements: string[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    const sql = String(init?.body || "");
+    statements.push(sql);
+    return { ok: true, json: async () => ({ data: sql.includes("blob1 = 'event'") ? rows : [] }) } as any;
+  });
+
+  const request = new Request(
+    "https://example.com/api/stats?site=dave-blake.com&range=7d&environment=production&traffic=production&source_host=dave-blake.com",
+    { headers: { Authorization: "Bearer test-secret" } }
+  );
+  const response = await worker.fetch(request, {
+    ...makeEnv(), SITE_ALLOWLIST: "startmyloveengine,dave-blake.com"
+  });
+  const json = await response.json() as any;
+  expect(response.status).toBe(200);
+  expect(json.events.verifiedLeads).toMatchObject({ total: 3, observedSessions: 3 });
+  expect(json.events.verifiedLeads.byFirstTouchSource).toEqual([
+    { source: "www.google.com", count: 1 },
+    { source: "direct", count: 1 },
+    { source: "unknown", count: 1 }
+  ]);
+  expect(json.events.verifiedLeads.byFirstTouchLandingPage).toContainEqual({
+    path: "/models/digitals/", leads: 1
+  });
+  expect(json.events.verifiedLeads.byFirstTouchUtmCampaign).toContainEqual({
+    campaign: "spring", count: 1
+  });
+  expect(json.events.ctaClicks).toContainEqual({
+    ctaId: "brisbane_digitals_hero_enquiry", clicks: 2
+  });
+  expect(json.events.ctaClicks).toContainEqual({ ctaId: "unknown", clicks: 1 });
+  expect(json.events.funnel).toMatchObject({
+    observedSessions: 3,
+    eventCounts: {
+      ctaClicks: 3, formViews: 1, formStarts: 1, validationErrors: 1,
+      submitErrors: 1, verifiedLeads: 3
+    },
+    observedSessionCounts: { ctaClicks: 2, verifiedLeads: 3 }
+  });
+  expect(json.events.leads.total).toBe(3);
+  expect(statements.filter(sql => sql.includes("blob1 = 'event'")).every(sql =>
+    sql.includes("blob16 = 'dave-blake.com'") &&
+    (sql.match(/AND blob17 = 'production'/g) || []).length === 1
+  )).toBe(true);
+});
+
+test("test traffic on the production host appears only in the test slice", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => ({
+    ok: true,
+    json: async () => ({ data: String(init?.body || "").includes("blob1 = 'event'") ? [{
+      vendor: "dave-blake", page: "models-contact", event_type: "submit",
+      event_name: "db_contact_form_submit_success", date: today,
+      event_environment: "production", count: 1,
+      event_context: JSON.stringify({ custom: {
+        session_id: "session-test", is_test_traffic: "true",
+        first_touch_source: "utm:analytics_smoke"
+      } })
+    }, {
+      vendor: "dave-blake", page: "models-contact", event_type: "view",
+      event_name: "db_contact_form_view", date: today,
+      event_environment: "production", count: 1,
+      event_context: JSON.stringify({ custom: { session_id: "session-test" } })
+    }] : [] })
+  } as any));
+  const env = { ...makeEnv(), SITE_ALLOWLIST: "startmyloveengine,dave-blake.com" };
+  const request = (traffic: string) => new Request(
+    `https://example.com/api/stats?site=dave-blake.com&range=7d&environment=production&traffic=${traffic}`,
+    { headers: { Authorization: "Bearer test-secret" } }
+  );
+  const production = await (await worker.fetch(request("production"), env)).json() as any;
+  const testData = await (await worker.fetch(request("test"), env)).json() as any;
+  expect(production.events.verifiedLeads.total).toBe(0);
+  expect(production.events.verifiedLeads.byFirstTouchSource).toEqual([]);
+  expect(production.events.funnel.eventCounts.formViews).toBe(0);
+  expect(testData.events.verifiedLeads.total).toBe(1);
+  expect(testData.events.funnel.eventCounts.formViews).toBe(1);
+  expect(testData.events.verifiedLeads.byFirstTouchSource).toEqual([
+    { source: "utm:analytics_smoke", count: 1 }
+  ]);
+});
+
+test("malformed event context is grouped as unknown without exposing identifiers", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => ({
+    ok: true,
+    json: async () => ({ data: String(init?.body || "").includes("blob1 = 'event'") ? [{
+      vendor: "dave-blake", page: "models-contact", event_type: "submit",
+      event_name: "db_contact_form_submit_success", date: today,
+      event_environment: "production", count: 1, event_context: "{invalid"
+    }] : [] })
+  } as any));
+  const response = await worker.fetch(makeRequest(), makeEnv());
+  const json = await response.json() as any;
+  expect(response.status).toBe(200);
+  expect(json.events.verifiedLeads.total).toBe(1);
+  expect(json.events.verifiedLeads.observedSessions).toBe(0);
+  expect(json.events.verifiedLeads.byFirstTouchSource).toEqual([
+    { source: "unknown", count: 1 }
+  ]);
+  expect(json.events.verifiedLeads.byFirstTouchLandingPage).toEqual([
+    { path: "unknown", leads: 1 }
+  ]);
+});
+
+test("new decision fields are empty on an empty stats range", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue({
+    ok: true, json: async () => ({ data: [] })
+  } as any);
+  const response = await worker.fetch(makeRequest(), makeEnv());
+  const json = await response.json() as any;
+  expect(json.events.verifiedLeads).toMatchObject({
+    total: 0, observedSessions: 0, byFirstTouchSource: [],
+    byFirstTouchLandingPage: [], byFirstTouchUtmCampaign: []
+  });
+  expect(json.events.ctaClicks).toEqual([]);
+  expect(json.events.funnel.eventCounts.verifiedLeads).toBe(0);
+  expect(json.events.funnel.observedSessionCounts.verifiedLeads).toBe(0);
+});
+
+test("classifies a mixed session consistently in every test traffic aggregate", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const row = (name: string, session: string, custom: Record<string, unknown>) => ({
+    page: "models-contact", event_type: "custom", event_name: name, date: today,
+    event_environment: "production", count: 1,
+    event_context: JSON.stringify({ custom: { session_id: session, ...custom } })
+  });
+  const rows = [
+    row("db_cta_click", "mixed-session-123", { cta_id: "mixed_cta" }),
+    row("db_contact_form_submit_success", "mixed-session-123", {
+      is_test_traffic: "true", first_touch_source: "audit"
+    }),
+    row("db_contact_form_submit_success", "real-session-123", { first_touch_source: "search" })
+  ];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => ({
+    ok: true, json: async () => ({ data: String(init?.body).includes("blob1 = 'event'") ? rows : [] })
+  } as any));
+  const env = { ...makeEnv(), SITE_ALLOWLIST: "startmyloveengine,dave-blake.com" };
+  const stats = async (traffic: string) => (await (await worker.fetch(new Request(
+    `https://example.com/api/stats?site=dave-blake.com&range=7d&traffic=${traffic}`,
+    { headers: { Authorization: "Bearer test-secret" } }
+  ), env)).json()) as any;
+  const production = await stats("production");
+  const testData = await stats("test");
+  expect(production.events.byTestTraffic).toEqual([{ trafficType: "production", count: 1 }]);
+  expect(production.events.ctaClicks).toEqual([]);
+  expect(production.events.verifiedLeads).toMatchObject({ total: 1, observedSessions: 1 });
+  expect(production.behaviour.quality.observedSessions).toBe(1);
+  expect(testData.events.byTestTraffic).toEqual([{ trafficType: "test", count: 2 }]);
+  expect(testData.events.ctaClicks).toEqual([{ ctaId: "mixed_cta", clicks: 1 }]);
+  expect(testData.events.verifiedLeads).toMatchObject({ total: 1, observedSessions: 1 });
+  expect(testData.behaviour.quality.observedSessions).toBe(1);
+});
+
+test("legacy empty environment rows stay out of production reporting", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = ["", "staging", "production"].map((event_environment, i) => ({
+    page: "models-contact", event_type: "submit",
+    event_name: "db_contact_form_submit_success", date: today,
+    event_environment, count: 1,
+    event_context: JSON.stringify({ custom: {
+      session_id: `environment-${i}`, first_touch_source: event_environment || "legacy"
+    } })
+  }));
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => ({
+    ok: true, json: async () => ({ data: String(init?.body).includes("blob1 = 'event'") ? rows : [] })
+  } as any));
+  const env = { ...makeEnv(), SITE_ALLOWLIST: "startmyloveengine,dave-blake.com" };
+  const stats = async (traffic: string) => (await (await worker.fetch(new Request(
+    `https://example.com/api/stats?site=dave-blake.com&range=7d&traffic=${traffic}`,
+    { headers: { Authorization: "Bearer test-secret" } }
+  ), env)).json()) as any;
+  const production = await stats("production");
+  const testData = await stats("test");
+  expect(production.events.verifiedLeads.total).toBe(1);
+  expect(production.events.byTestTraffic).toEqual([{ trafficType: "production", count: 1 }]);
+  expect(testData.events.verifiedLeads.total).toBe(2);
+  expect(testData.events.byTestTraffic).toEqual([{ trafficType: "test", count: 2 }]);
+  expect(production.behaviour.quality.excludedTestEstimate).toBe(2);
+});
+
+test("keeps case and characters after position 96 in stored lead attribution", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const campaigns = ["Spring", "spring", `${"C".repeat(96)}A`, `${"C".repeat(96)}B`, "__proto__", "constructor"];
+  const rows = campaigns.map((campaign, index) => ({
+    page: "models-contact", event_type: "submit",
+    event_name: "db_contact_form_submit_success", date: today,
+    event_environment: "production", count: 1,
+    event_context: JSON.stringify({ custom: {
+      session_id: `campaign-session-${index}`,
+      first_touch_source: index % 2 ? "Google" : "google",
+      first_touch_landing_page: index % 2 ? "/Campaign/" : "/campaign/",
+      first_touch_utm_campaign: campaign
+    } })
+  }));
+  rows.push({
+    page: "models-digitals", event_type: "click", event_name: "db_cta_click",
+    date: today, event_environment: "production", count: 1,
+    event_context: JSON.stringify({ custom: { session_id: "cta-constructor", cta_id: "constructor" } })
+  });
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => ({
+    ok: true,
+    json: async () => ({ data: String(init?.body).includes("blob1 = 'event'") ? rows : [] })
+  } as any));
+  const response = await worker.fetch(new Request(
+    "https://example.com/api/stats?site=dave-blake.com&range=7d&traffic=production",
+    { headers: { Authorization: "Bearer test-secret" } }
+  ), { ...makeEnv(), SITE_ALLOWLIST: "startmyloveengine,dave-blake.com" });
+  const json = await response.json() as any;
+  expect(response.status).toBe(200);
+  expect(json.events.verifiedLeads).toMatchObject({ total: 6, observedSessions: 6 });
+  expect(json.events.verifiedLeads.byFirstTouchUtmCampaign).toHaveLength(6);
+  for (const campaign of campaigns) {
+    expect(json.events.verifiedLeads.byFirstTouchUtmCampaign).toContainEqual({ campaign, count: 1 });
+  }
+  expect(json.events.verifiedLeads.byFirstTouchSource).toEqual([
+    { source: "google", count: 3 }, { source: "Google", count: 3 }
+  ]);
+  expect(json.events.verifiedLeads.byFirstTouchLandingPage).toEqual([
+    { path: "/campaign/", leads: 3 }, { path: "/Campaign/", leads: 3 }
+  ]);
+  expect(json.events.ctaClicks).toContainEqual({ ctaId: "constructor", clicks: 1 });
+});
+
+test("uses the stored envelope path and configured internal hosts for behaviour transitions", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = [
+    { target_domain: "www.dave-blake.com", to_path: "/models/contact/" },
+    { target_domain: "main.dave-blake.com", to_path: "/models/contact/" },
+    { target_domain: "startmyloveengine.com", to_path: "/models/contact/" },
+    { target_domain: "agency.example", to_path: "/booking/" }
+  ].map(custom => ({
+    page: "models-digitals", event_type: "click", event_name: "db_cta_click",
+    date: today, event_environment: "production", count: 1,
+    event_context: JSON.stringify({
+      sourcePath: "/models/digitals/",
+      custom: { session_id: "transition-session-123", ...custom }
+    })
+  }));
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => ({
+    ok: true,
+    json: async () => ({ data: String(init?.body).includes("blob1 = 'event'") ? rows : [] })
+  } as any));
+  const response = await worker.fetch(new Request(
+    "https://example.com/api/stats?site=dave-blake.com&range=7d&traffic=production",
+    { headers: { Authorization: "Bearer test-secret" } }
+  ), { ...makeEnv(), SITE_ALLOWLIST: "startmyloveengine,dave-blake.com" });
+  const json = await response.json() as any;
+  expect(response.status).toBe(200);
+  expect(json.behaviour.transitions).toEqual([
+    { from: "/models/digitals", to: "/models/contact", sessions: 1 },
+    { from: "/models/digitals", to: "agency.example/booking", sessions: 1 }
+  ]);
+});
+
+test("keeps the live stats response fields and behaviour shape", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue({
+    ok: true, json: async () => ({ data: [] })
+  } as any);
+  const json = await (await worker.fetch(makeRequest(), makeEnv())).json() as any;
+  const liveTopLevel = ["site", "environment", "sourceHostFilter", "environmentFilter",
+    "trafficMode", "endpointHost", "range", "contractVersion", "generatedAt",
+    "vendors", "daily", "dailyViews", "dailyUniqueViews", "tierViews", "behaviour",
+    "events", "dataSource"];
+  expect(Object.keys(json).sort()).toEqual(liveTopLevel.sort());
+  expect(Object.keys(json.behaviour).sort()).toEqual([
+    "version", "measurement", "quality", "funnel", "landingPages", "sources",
+    "pathways", "errors", "transitions", "limitations"
+  ].sort());
+  expect(json.behaviour.measurement).toBe("observed_sessions_not_verified_leads");
+  const liveEventFields = ["total", "byName", "byType", "byPage", "byFunnelStep",
+    "byNextStep", "byPathway", "byTimeline", "bySourcePath", "byTargetDomain",
+    "byOutboundKind", "byScrollDepth", "byEngagedTimeSeconds", "byNavArea",
+    "bySourceHost", "bySourceEnvironment", "bySourceHostAndType",
+    "bySourceEnvironmentAndType", "byTestTraffic", "byAccessOutcome", "leads",
+    "referralAgencies", "errors", "daily", "dailyByName", "sessions", "attribution"];
+  for (const field of liveEventFields) expect(json.events).toHaveProperty(field);
+  expect(json.events).toHaveProperty("verifiedLeads");
+  expect(json.events).toHaveProperty("ctaClicks");
+  expect(json.events).toHaveProperty("funnel");
 });

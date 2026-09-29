@@ -402,3 +402,170 @@ test("enforces optional event allowlists from env", async () => {
   expect(badResponse.status).toBe(400);
   expect(await badResponse.text()).toBe("Invalid page");
 });
+
+test("retains decision fields when a large event context is compacted", async () => {
+  const writes: any[] = [];
+  const customContext = {
+    session_id: "shared-session-123",
+    is_test_traffic: true,
+    source_env: "production",
+    first_touch_source: "utm:campaign",
+    first_touch_landing_page: "/models/digitals/",
+    first_touch_utm_campaign: "spring",
+    cta_id: "brisbane_digitals_hero_enquiry",
+    ...Object.fromEntries(
+      Array.from({ length: 28 }, (_, i) => [`extra_${i}`, "x".repeat(240)])
+    )
+  };
+  const response = await worker.fetch(
+    new Request("https://example.com/event", {
+      method: "POST",
+      headers: { Origin: "https://dave-blake.com", "Content-Type": "text/plain" },
+      body: JSON.stringify({
+        site: "dave-blake.com",
+        vendor: "dave-blake",
+        event_name: "db_cta_click",
+        event_type: "click",
+        page: "models-digitals",
+        session_id: "shared-session-123",
+        url: "https://dave-blake.com/models/digitals/",
+        custom_context: customContext
+      })
+    }),
+    makeEnv(writes)
+  );
+  expect(response.status).toBe(204);
+  const stored = writes.find(point => point.blobs[0] === "event").blobs[19];
+  const context = JSON.parse(stored).custom;
+  expect(stored.length).toBeLessThanOrEqual(1500);
+  expect(context.session_id).toBe("shared-session-123");
+  expect(context.is_test_traffic).toBe("true");
+  expect(context.first_touch_source).toBe("utm:campaign");
+  expect(context.first_touch_landing_page).toBe("/models/digitals/");
+  expect(context.first_touch_utm_campaign).toBe("spring");
+  expect(context.cta_id).toBe("brisbane_digitals_hero_enquiry");
+});
+
+test("canonicalizes camelCase decision fields before both context limits", async () => {
+  const writes: any[] = [];
+  const customContext = {
+    ...Object.fromEntries(Array.from({ length: 35 }, (_, i) => [`extra_${i}`, "x".repeat(240)])),
+    sessionId: "camel-session-123",
+    isTestTraffic: true,
+    sourceEnv: "production",
+    firstTouchSource: "utm:campaign",
+    firstTouchLandingPage: "/models/digitals/",
+    firstTouchUtmCampaign: "camel-spring",
+    ctaId: "brisbane_digitals_hero_enquiry"
+  };
+  const response = await worker.fetch(
+    new Request("https://example.com/event", {
+      method: "POST",
+      headers: { Origin: "https://dave-blake.com", "Content-Type": "text/plain" },
+      body: JSON.stringify({
+        site: "dave-blake.com", vendor: "dave-blake", event_name: "db_cta_click",
+        event_type: "click", page: "models-digitals", session_id: "camel-session-123",
+        url: "https://dave-blake.com/models/digitals/", custom_context: customContext
+      })
+    }), makeEnv(writes)
+  );
+  expect(response.status).toBe(204);
+  const stored = writes.find(point => point.blobs[0] === "event").blobs[19];
+  const context = JSON.parse(stored).custom;
+  expect(stored.length).toBeLessThanOrEqual(1500);
+  expect(context).toMatchObject({
+    session_id: "camel-session-123", is_test_traffic: "true", source_env: "production",
+    first_touch_source: "utm:campaign", first_touch_landing_page: "/models/digitals/",
+    first_touch_utm_campaign: "camel-spring", cta_id: "brisbane_digitals_hero_enquiry"
+  });
+  expect(context.firstTouchSource).toBeUndefined();
+});
+
+test("reserves compacted context space for every present decision field", async () => {
+  const writes: any[] = [];
+  const customContext = {
+    sessionId: "s".repeat(128),
+    isTestTraffic: false,
+    sourceEnv: "production",
+    eventTsClient: "2026-09-29T04:00:00.000Z",
+    pagePath: `/${"page-".repeat(35)}`,
+    firstTouchSource: `utm:${"s".repeat(80)}`,
+    firstTouchLandingPage: `/${"landing-".repeat(23)}`,
+    firstTouchUtmSource: "u".repeat(120),
+    firstTouchUtmMedium: "m".repeat(120),
+    firstTouchUtmCampaign: "Campaign-" + "C".repeat(151),
+    ctaId: "cta_" + "c".repeat(76),
+    funnelStep: "submit_success",
+    pathway: "digitals-only",
+    errorType: "validation_field_error",
+    errorClass: "validation",
+    fieldName: "email",
+    httpStatus: 422,
+    ...Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`extra_${i}`, "x".repeat(240)]))
+  };
+  const response = await worker.fetch(new Request("https://example.com/event", {
+    method: "POST",
+    headers: { Origin: "https://dave-blake.com", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      site: "dave-blake.com", vendor: "dave-blake",
+      event_name: "db_contact_form_submit_success", event_type: "submit",
+      page: "models-contact", session_id: customContext.sessionId,
+      url: "https://dave-blake.com/models/contact/",
+      custom_context: customContext
+    })
+  }), makeEnv(writes));
+  expect(response.status).toBe(204);
+  const stored = writes.find(point => point.blobs[0] === "event").blobs[19];
+  const context = JSON.parse(stored);
+  expect(context.truncated).toBe(true);
+  expect(stored.length).toBeLessThanOrEqual(1500);
+  expect(context.custom).toMatchObject({
+    session_id: customContext.sessionId,
+    is_test_traffic: "false",
+    source_env: "production",
+    event_ts_client: customContext.eventTsClient,
+    first_touch_source: customContext.firstTouchSource,
+    first_touch_utm_campaign: customContext.firstTouchUtmCampaign,
+    cta_id: customContext.ctaId,
+    funnel_step: "submit_success",
+    pathway: "digitals-only",
+    error_type: "validation_field_error",
+    error_class: "validation",
+    field_name: "email",
+    http_status: "422"
+  });
+  for (const key of ["page_path", "first_touch_landing_page", "first_touch_utm_source", "first_touch_utm_medium"]) {
+    expect(context.custom[key]).toBeTruthy();
+  }
+});
+
+test("counts JSON escapes inside the compacted critical field budgets", async () => {
+  const writes: any[] = [];
+  const response = await worker.fetch(new Request("https://example.com/event", {
+    method: "POST",
+    headers: { Origin: "https://dave-blake.com", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      site: "dave-blake.com", vendor: "dave-blake",
+      event_name: "db_contact_form_validation_error", event_type: "error",
+      page: "models-contact", session_id: "escaped-session-123",
+      url: "https://dave-blake.com/models/contact/",
+      custom_context: {
+        firstTouchSource: `utm:${'"'.repeat(90)}`,
+        firstTouchUtmCampaign: `Escape-${'\\'.repeat(160)}`,
+        fieldName: "email", errorType: `validation_${'"'.repeat(90)}`,
+        eventTsClient: "2026-09-29T04:00:00.000Z",
+        ...Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`extra_${i}`, "x".repeat(240)]))
+      }
+    })
+  }), makeEnv(writes));
+  expect(response.status).toBe(204);
+  const stored = writes.find(point => point.blobs[0] === "event").blobs[19];
+  const context = JSON.parse(stored);
+  expect(context.truncated).toBe(true);
+  expect(stored.length).toBeLessThanOrEqual(1500);
+  expect(context.custom).toHaveProperty("session_id", "escaped-session-123");
+  expect(context.custom).toHaveProperty("event_ts_client", "2026-09-29T04:00:00.000Z");
+  expect(context.custom).toHaveProperty("first_touch_utm_campaign");
+  expect(context.custom).toHaveProperty("error_type");
+  expect(context.custom).toHaveProperty("field_name", "email");
+});

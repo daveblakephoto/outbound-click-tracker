@@ -1,3 +1,4 @@
+import { buildBehaviourInsights, knownTestReason, type BehaviourEvent } from "./behaviour-insights";
 // Optional hardening features:
 // - CLICK_SIGNING_SECRET enables HMAC-signed click URLs
 // - RATE_LIMIT_PER_MINUTE enables per-IP rate limiting
@@ -580,9 +581,10 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       : trafficMode === "production"
         ? " AND blob17 = 'production'"
         : "";
-  const baseWhere = `WHERE blob2 = ${sqlString(site)} AND blob11 >= ${sqlString(
+  const eventWhere = `WHERE blob2 = ${sqlString(site)} AND blob11 >= ${sqlString(
     startDate
-  )} AND blob11 <= ${sqlString(endDate)}${sourceHostWhere}${sourceEnvironmentWhere}${trafficWhere}`;
+  )} AND blob11 <= ${sqlString(endDate)}${sourceHostWhere}${sourceEnvironmentWhere}`;
+  const baseWhere = `${eventWhere}${trafficWhere}`;
 
   const timings: Record<string, number> = {};
   const timedQuery = async (label: string, sql: string) => {
@@ -641,9 +643,9 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       ),
       timedQuery(
         "events",
-        `SELECT blob3 AS vendor, blob4 AS page, blob7 AS event_type, blob8 AS event_name, blob11 AS date, blob20 AS event_context, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+        `SELECT blob3 AS vendor, blob4 AS page, blob7 AS event_type, blob8 AS event_name, blob11 AS date, blob17 AS event_environment, blob20 AS event_context, COUNT() AS sampled_rows, MAX(_sample_interval) AS max_sample_interval, SUM(_sample_interval) AS count FROM ${datasetIdent} ${eventWhere} AND blob1 = ${sqlString(
           ANALYTICS_EVENT_TYPES.EVENT
-        )} GROUP BY vendor, page, event_type, event_name, date, event_context`
+        )} GROUP BY vendor, page, event_type, event_name, date, event_environment, event_context`
       ),
       timedQuery(
         "source_hosts",
@@ -720,6 +722,12 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const agencyModelContactClickSessionByVendor: Record<string, Set<string>> = {};
   const eventSessionDailyByName: Record<string, Record<string, Set<string>>> = {};
   const eventSessionTotal = new Set<string>();
+  const verifiedLeadSessions = new Set<string>();
+  // Stored identity values may equal Object prototype property names.
+  const verifiedLeadsBySource: Record<string, number> = Object.create(null);
+  const verifiedLeadsByLandingPage: Record<string, number> = Object.create(null);
+  const verifiedLeadsByUtmCampaign: Record<string, number> = Object.create(null);
+  const ctaClicksById: Record<string, number> = Object.create(null);
   const sessionAttribution: Record<
     string,
     {
@@ -763,6 +771,10 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     target[key] = (target[key] || 0) + count;
   };
 
+  // Attribution labels and CTA IDs are identities, unlike folded metric labels.
+  const storedIdentity = (value: unknown) =>
+    value == null ? "" : String(value).trim();
+
   const addSessionMetric = (
     target: Record<string, Set<string>>,
     key: string,
@@ -798,12 +810,11 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     return candidate;
   };
 
-  const normalizePathMetric = (value: unknown) => {
-    const raw = String(value || "")
-      .trim()
-      .toLowerCase();
+  const normalizePathMetric = (value: unknown, preserveCase = false) => {
+    const text = String(value || "").trim();
+    const raw = preserveCase ? text : text.toLowerCase();
     if (!raw) return "";
-    let withoutOrigin = raw.replace(/^https?:\/\/[^/]+/, "");
+    let withoutOrigin = raw.replace(/^https?:\/\/[^/]+/i, "");
     withoutOrigin = withoutOrigin.split("?")[0].split("#")[0];
     if (!withoutOrigin) return "";
     if (!withoutOrigin.startsWith("/")) {
@@ -974,8 +985,9 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     return "";
   };
 
-  const readEventCustomContext = (rawContext: unknown) => {
-    if (typeof rawContext !== "string" || !rawContext.trim()) return {};
+  const readEventContext = (rawContext: unknown) => {
+    const empty = { custom: {} as Record<string, unknown>, sourcePath: "" };
+    if (typeof rawContext !== "string" || !rawContext.trim()) return empty;
     try {
       const parsed = JSON.parse(rawContext);
       if (
@@ -984,17 +996,35 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         Array.isArray(parsed) ||
         !("custom" in parsed)
       ) {
-        return {};
+        return empty;
       }
       const custom = (parsed as any).custom;
       if (!custom || typeof custom !== "object" || Array.isArray(custom)) {
-        return {};
+        return empty;
       }
-      return custom as Record<string, unknown>;
+      return {
+        custom: custom as Record<string, unknown>,
+        sourcePath: typeof (parsed as any).sourcePath === "string"
+          ? (parsed as any).sourcePath
+          : ""
+      };
     } catch {
-      return {};
+      return empty;
     }
   };
+  const readEventCustomContext = (rawContext: unknown) => readEventContext(rawContext).custom;
+
+  // Classify the full observed session before selecting a traffic slice.
+  // blob17 is authoritative: legacy empty environments are non-production.
+  const knownTestSessions = new Set<string>();
+  for (const row of eventRows) {
+    const custom = readEventCustomContext(row.event_context);
+    const sessionId = toSessionId(custom.session_id ?? custom.sessionId);
+    const environment = toMetricValue(row.event_environment);
+    if (sessionId && (knownTestReason(custom) || environment !== "production")) {
+      knownTestSessions.add(sessionId);
+    }
+  }
 
   for (const row of clickRows) {
     const vendor = String(row.vendor || "").trim();
@@ -1141,6 +1171,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       (sourceEnvironmentByType[sourceEnvironment][recordType] || 0) + count;
   }
 
+  const behaviourEvents: BehaviourEvent[] = [];
+  let excludedTestEstimate = 0;
   for (const row of eventRows) {
     const eventName = toMetricValue(row.event_name);
     const eventType = toMetricValue(row.event_type);
@@ -1148,6 +1180,22 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     const date = String(row.date || "").trim();
     const count = toCount(row.count);
     if (!eventName || !eventType || !count) continue;
+
+    const { custom, sourcePath: eventSourcePath } = readEventContext(row.event_context);
+    const sessionId = toSessionId(custom.session_id ?? custom.sessionId);
+    const eventEnvironment = toMetricValue(row.event_environment);
+    const isTestEvent = Boolean(knownTestReason(custom)) || knownTestSessions.has(sessionId) ||
+      eventEnvironment !== "production";
+    if (trafficMode === "production" && isTestEvent) {
+      excludedTestEstimate += count;
+      continue;
+    }
+    if (trafficMode === "test" && !isTestEvent) continue;
+    behaviourEvents.push({
+      name: eventName, page, count, custom, sourcePath: eventSourcePath,
+      sampledRows: row.sampled_rows == null ? undefined : toCount(row.sampled_rows),
+      maxSampleInterval: row.max_sample_interval == null ? undefined : Number(row.max_sample_interval)
+    });
 
     addMetric(eventByName, eventName, count);
     addMetric(eventByType, eventType, count);
@@ -1162,8 +1210,6 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         (eventDailyByName[eventName][date] || 0) + count;
     }
 
-    const custom = readEventCustomContext(row.event_context);
-    const sessionId = toSessionId(custom.session_id ?? custom.sessionId);
     const funnelStep = toMetricValue(custom.funnel_step ?? custom.funnelStep);
     const nextStep = toMetricValue(custom.next_step ?? custom.nextStep);
     const sourcePath = toMetricValue(custom.source_path ?? custom.sourcePath);
@@ -1223,22 +1269,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     const accessOutcome = toMetricValue(custom.access_outcome ?? custom.accessOutcome);
     const errorType = toMetricValue(custom.error_type ?? custom.errorType);
     const fieldName = toMetricValue(custom.field_name ?? custom.fieldName);
-    const sourceEnvironment = toMetricValue(
-      custom.source_env ?? custom.sourceEnv ?? custom.environment
-    );
-    const explicitIsTestTraffic =
-      parseBooleanLike(custom.is_test_traffic ?? custom.isTestTraffic) ??
-      parseBooleanLike(custom.test_traffic);
-    const testTrafficKey =
-      explicitIsTestTraffic === true
-        ? "test"
-        : explicitIsTestTraffic === false
-          ? "production"
-          : sourceEnvironment && sourceEnvironment !== "production"
-            ? "test"
-            : sourceEnvironment === "production"
-              ? "production"
-              : "unknown";
+    const testTrafficKey = isTestEvent ? "test" : "production";
     const httpStatusRaw = Number(
       custom.http_status ?? custom.httpStatus ?? custom.status_code ?? 0
     );
@@ -1264,6 +1295,36 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     addMetric(eventErrorsByType, errorType, count);
     addMetric(eventErrorsByClass, errorClass, count);
     addMetric(eventErrorsByField, fieldName, count);
+
+    if (eventName === "db_contact_form_submit_success") {
+      const firstTouchSource = storedIdentity(
+        custom.first_touch_source ?? custom.firstTouchSource
+      ) || "unknown";
+      const landingPath = normalizePathMetric(
+        custom.first_touch_landing_page ?? custom.firstTouchLandingPage,
+        true
+      );
+      const firstTouchLandingPage = landingPath
+        ? landingPath === "/" || /\.[a-z0-9]+$/i.test(landingPath)
+          ? landingPath
+          : `${landingPath}/`
+        : "unknown";
+      const campaign = storedIdentity(
+        custom.first_touch_utm_campaign ?? custom.firstTouchUtmCampaign
+      ) || "none";
+      addMetric(verifiedLeadsBySource, firstTouchSource, count);
+      addMetric(verifiedLeadsByLandingPage, firstTouchLandingPage, count);
+      addMetric(verifiedLeadsByUtmCampaign, campaign, count);
+      if (sessionId) verifiedLeadSessions.add(sessionId);
+    }
+    if (eventName === "db_cta_click") {
+      const ctaId = storedIdentity(custom.cta_id ?? custom.ctaId);
+      addMetric(
+        ctaClicksById,
+        /^[a-z0-9][a-z0-9_-]{0,79}$/.test(ctaId) ? ctaId : "unknown",
+        count
+      );
+    }
 
     const leadType = inferLeadType({
       eventName,
@@ -1626,6 +1687,23 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const referralSuccessSessionTotal = Object.values(
     referralSuccessSessionByAgency
   ).reduce((sum, sessions) => sum + sessions.size, 0);
+  const funnelEventNames = {
+    ctaClicks: "db_cta_click",
+    formViews: "db_contact_form_view",
+    formStarts: "db_contact_form_start",
+    validationErrors: "db_contact_form_validation_error",
+    submitErrors: "db_contact_form_submit_error",
+    verifiedLeads: "db_contact_form_submit_success"
+  };
+  const funnelEventCounts = Object.fromEntries(
+    Object.entries(funnelEventNames).map(([key, name]) => [key, eventByName[name] || 0])
+  );
+  const funnelObservedSessionCounts = Object.fromEntries(
+    Object.entries(funnelEventNames).map(([key, name]) => [
+      key,
+      eventSessionByName[name]?.size || 0
+    ])
+  );
 
   const payload: Record<string, unknown> = {
     site,
@@ -1642,6 +1720,11 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     dailyViews: dailyViewTotals,
     dailyUniqueViews: dailyUniqueViewTotals,
     tierViews,
+    behaviour: buildBehaviourInsights(
+      behaviourEvents,
+      excludedTestEstimate,
+      Array.from(INTERNAL_REFERRER_DOMAINS)
+    ),
     events: {
       total: Object.values(eventByName).reduce((sum, value) => sum + value, 0),
       byName: toBreakdown(eventByName, "eventName"),
@@ -1687,6 +1770,26 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         .sort((a, b) => b.total - a.total),
       byTestTraffic: toBreakdown(eventByTestTraffic, "trafficType"),
       byAccessOutcome: toBreakdown(eventByAccessOutcome, "accessOutcome"),
+      verifiedLeads: {
+        total: eventByName.db_contact_form_submit_success || 0,
+        observedSessions: verifiedLeadSessions.size,
+        byFirstTouchSource: toBreakdown(verifiedLeadsBySource, "source"),
+        byFirstTouchLandingPage: Object.entries(verifiedLeadsByLandingPage)
+          .map(([path, leads]) => ({ path, leads }))
+          .sort((a, b) => b.leads - a.leads),
+        byFirstTouchUtmCampaign: toBreakdown(
+          verifiedLeadsByUtmCampaign,
+          "campaign"
+        )
+      },
+      ctaClicks: Object.entries(ctaClicksById)
+        .map(([ctaId, clicks]) => ({ ctaId, clicks }))
+        .sort((a, b) => b.clicks - a.clicks),
+      funnel: {
+        observedSessions: eventSessionTotal.size,
+        eventCounts: funnelEventCounts,
+        observedSessionCounts: funnelObservedSessionCounts
+      },
       leads: {
         total: leadTotal,
         estimatedValueTotal: leadEstimatedValueTotal,
@@ -2339,66 +2442,99 @@ const classifyUserPlatform = (userAgent: string) => {
 const MAX_EVENT_CONTEXT_LENGTH = 1500;
 const MAX_CUSTOM_CONTEXT_KEYS = 28;
 const MAX_CUSTOM_CONTEXT_VALUE_LENGTH = 240;
+// These are encoded JSON value budgets for compacted contexts. Together with
+// every key and the envelope, all fields fit within 1,500 characters.
+const CRITICAL_CONTEXT_VALUE_BUDGETS: Record<string, number> = {
+  session_id: 128,
+  is_test_traffic: 5,
+  source_env: 16,
+  event_ts_client: 40,
+  page_path: 160,
+  first_touch_source: 84,
+  first_touch_landing_page: 160,
+  first_touch_utm_source: 64,
+  first_touch_utm_medium: 48,
+  first_touch_utm_campaign: 160,
+  cta_id: 80,
+  funnel_step: 24,
+  pathway: 24,
+  error_type: 48,
+  error_class: 24,
+  field_name: 48,
+  http_status: 4
+};
+
+const fitJsonString = (value: string, encodedBudget: number) => {
+  const characters = Array.from(value);
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const encodedLength = JSON.stringify(characters.slice(0, middle).join("")).length - 2;
+    if (encodedLength <= encodedBudget) low = middle;
+    else high = middle - 1;
+  }
+  return characters.slice(0, low).join("");
+};
+const CUSTOM_CONTEXT_ALIASES: Record<string, string> = {
+  sessionId: "session_id", eventId: "event_id", isTestTraffic: "is_test_traffic",
+  test_traffic: "is_test_traffic", sourceEnv: "source_env",
+  firstTouchSource: "first_touch_source",
+  firstTouchLandingPage: "first_touch_landing_page",
+  firstTouchUtmSource: "first_touch_utm_source",
+  firstTouchUtmMedium: "first_touch_utm_medium",
+  firstTouchUtmCampaign: "first_touch_utm_campaign",
+  ctaId: "cta_id", pagePath: "page_path", eventTsClient: "event_ts_client",
+  funnelStep: "funnel_step", nextStep: "next_step",
+  scrollDepthPct: "scroll_depth_pct", maxScrollPct: "max_scroll_pct",
+  engagedTimeSeconds: "engaged_time_seconds", navArea: "nav_area",
+  fieldName: "field_name", errorType: "error_type", errorClass: "error_class",
+  httpStatus: "http_status", sourcePath: "source_path",
+  referralSource: "referral_source", agencySlug: "agency_slug",
+  targetPath: "target_path", toPath: "to_path", targetDomain: "target_domain",
+  outboundKind: "outbound_kind", ctaPosition: "cta_position",
+  ctaText: "cta_text", accessOutcome: "access_outcome",
+  lastTouchSource: "last_touch_source"
+};
 const CUSTOM_CONTEXT_PRIORITY_KEYS = [
+  "session_id",
+  "event_id",
+  "is_test_traffic",
+  "source_env",
+  "first_touch_source",
+  "first_touch_landing_page",
+  "first_touch_utm_source",
+  "first_touch_utm_medium",
+  "first_touch_utm_campaign",
+  "cta_id",
+  "page_path",
+  "event_ts_client",
   "funnel_step",
   "next_step",
   "scroll_depth_pct",
-  "scrollDepthPct",
   "max_scroll_pct",
-  "maxScrollPct",
   "engaged_time_seconds",
-  "engagedTimeSeconds",
   "nav_area",
-  "navArea",
   "pathway",
   "timeline",
   "field_name",
-  "fieldName",
   "error_type",
-  "errorType",
   "error_class",
-  "errorClass",
   "http_status",
-  "httpStatus",
-  "session_id",
-  "sessionId",
-  "event_id",
-  "eventId",
-  "event_ts_client",
-  "eventTsClient",
   "source_path",
-  "sourcePath",
   "referral_source",
-  "referralSource",
   "representation",
   "vendor",
   "agency_slug",
-  "agencySlug",
   "target_path",
-  "targetPath",
   "to_path",
-  "toPath",
   "target_domain",
-  "targetDomain",
   "outbound_kind",
-  "outboundKind",
-  "cta_id",
-  "ctaId",
   "cta_position",
-  "ctaPosition",
   "cta_text",
-  "ctaText",
   "access_outcome",
-  "accessOutcome",
-  "source_env",
-  "sourceEnv",
   "environment",
-  "is_test_traffic",
-  "isTestTraffic",
-  "first_touch_source",
-  "firstTouchSource",
   "last_touch_source",
-  "lastTouchSource",
   "landing_page",
   "utm_source",
   "utm_medium",
@@ -2415,7 +2551,14 @@ const sanitizeCustomContext = (value: unknown) => {
   const entries = Object.entries(value as Record<string, unknown>).filter(([key]) =>
     /^[a-zA-Z0-9_.-]{1,40}$/.test(key)
   );
+  // Canonical names win if both spellings are supplied. Do this before both
+  // the 28-key selection and the later 1500-character compaction.
   const byKey = new Map(entries);
+  for (const [alias, canonical] of Object.entries(CUSTOM_CONTEXT_ALIASES)) {
+    if (!byKey.has(alias)) continue;
+    if (!byKey.has(canonical)) byKey.set(canonical, byKey.get(alias));
+    byKey.delete(alias);
+  }
   const selected: Array<[string, string]> = [];
   const selectedKeys = new Set<string>();
   const toStringValue = (item: unknown) => {
@@ -2443,7 +2586,7 @@ const sanitizeCustomContext = (value: unknown) => {
   }
 
   if (selected.length < MAX_CUSTOM_CONTEXT_KEYS) {
-    for (const [key, item] of entries) {
+    for (const [key, item] of byKey) {
       tryAdd(key, item);
       if (selected.length >= MAX_CUSTOM_CONTEXT_KEYS) break;
     }
@@ -2475,11 +2618,30 @@ const buildEventContext = ({
 
   const serialized = JSON.stringify(context);
   if (serialized.length <= MAX_EVENT_CONTEXT_LENGTH) return serialized;
-  return JSON.stringify({
-    ...context,
-    custom: {},
+  const compact = {
+    custom: {} as Record<string, string>,
     truncated: true
-  });
+  };
+  for (const [key, budget] of Object.entries(CRITICAL_CONTEXT_VALUE_BUDGETS)) {
+    if (Object.hasOwn(customContext, key)) {
+      compact.custom[key] = fitJsonString(customContext[key], budget);
+    }
+  }
+  const addOptional = (key: string, value: string, budget: number, target: Record<string, string>) => {
+    target[key] = fitJsonString(value, budget);
+    if (JSON.stringify(compact).length > MAX_EVENT_CONTEXT_LENGTH) delete target[key];
+  };
+  // Optional envelope and context use only the space left after critical fields.
+  const optionalEnvelope: Record<string, string> = compact as Record<string, string>;
+  addOptional("sourcePath", sourcePath, 180, optionalEnvelope);
+  addOptional("platform", platform, 40, optionalEnvelope);
+  addOptional("referrerDomain", referrerDomain, 120, optionalEnvelope);
+  for (const key of ["event_name", "event_type", "target_domain", "to_path", "target_path"]) {
+    if (Object.hasOwn(customContext, key)) {
+      addOptional(key, customContext[key], 120, compact.custom);
+    }
+  }
+  return JSON.stringify(compact);
 };
 
 const classifyRefChannel = ({
