@@ -580,9 +580,10 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       : trafficMode === "production"
         ? " AND blob17 = 'production'"
         : "";
-  const baseWhere = `WHERE blob2 = ${sqlString(site)} AND blob11 >= ${sqlString(
+  const eventWhere = `WHERE blob2 = ${sqlString(site)} AND blob11 >= ${sqlString(
     startDate
-  )} AND blob11 <= ${sqlString(endDate)}${sourceHostWhere}${sourceEnvironmentWhere}${trafficWhere}`;
+  )} AND blob11 <= ${sqlString(endDate)}${sourceHostWhere}${sourceEnvironmentWhere}`;
+  const baseWhere = `${eventWhere}${trafficWhere}`;
 
   const timings: Record<string, number> = {};
   const timedQuery = async (label: string, sql: string) => {
@@ -641,9 +642,9 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       ),
       timedQuery(
         "events",
-        `SELECT blob3 AS vendor, blob4 AS page, blob7 AS event_type, blob8 AS event_name, blob11 AS date, blob20 AS event_context, SUM(_sample_interval) AS count FROM ${datasetIdent} ${baseWhere} AND blob1 = ${sqlString(
+        `SELECT blob3 AS vendor, blob4 AS page, blob7 AS event_type, blob8 AS event_name, blob11 AS date, blob17 AS event_environment, blob20 AS event_context, SUM(_sample_interval) AS count FROM ${datasetIdent} ${eventWhere} AND blob1 = ${sqlString(
           ANALYTICS_EVENT_TYPES.EVENT
-        )} GROUP BY vendor, page, event_type, event_name, date, event_context`
+        )} GROUP BY vendor, page, event_type, event_name, date, event_environment, event_context`
       ),
       timedQuery(
         "source_hosts",
@@ -720,6 +721,11 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const agencyModelContactClickSessionByVendor: Record<string, Set<string>> = {};
   const eventSessionDailyByName: Record<string, Record<string, Set<string>>> = {};
   const eventSessionTotal = new Set<string>();
+  const verifiedLeadSessions = new Set<string>();
+  const verifiedLeadsBySource: Record<string, number> = {};
+  const verifiedLeadsByLandingPage: Record<string, number> = {};
+  const verifiedLeadsByUtmCampaign: Record<string, number> = {};
+  const ctaClicksById: Record<string, number> = {};
   const sessionAttribution: Record<
     string,
     {
@@ -996,6 +1002,17 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     }
   };
 
+  // Test mode on the production hostname keeps source_env=production. Classify
+  // event rows from the stored flag before aggregating, including mixed sessions.
+  const knownTestSessions = new Set<string>();
+  for (const row of eventRows) {
+    const custom = readEventCustomContext(row.event_context);
+    const sessionId = toSessionId(custom.session_id ?? custom.sessionId);
+    if (sessionId && parseBooleanLike(custom.is_test_traffic ?? custom.isTestTraffic) === true) {
+      knownTestSessions.add(sessionId);
+    }
+  }
+
   for (const row of clickRows) {
     const vendor = String(row.vendor || "").trim();
     const clickType = String(row.click_type || "").trim().toLowerCase();
@@ -1149,6 +1166,19 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     const count = toCount(row.count);
     if (!eventName || !eventType || !count) continue;
 
+    const custom = readEventCustomContext(row.event_context);
+    const sessionId = toSessionId(custom.session_id ?? custom.sessionId);
+    const eventEnvironment = toMetricValue(
+      row.event_environment ?? custom.source_env ?? custom.environment
+    );
+    const flaggedTest = parseBooleanLike(
+      custom.is_test_traffic ?? custom.isTestTraffic ?? custom.test_traffic
+    ) === true;
+    const isTestEvent = flaggedTest || knownTestSessions.has(sessionId) ||
+      (eventEnvironment !== "" && eventEnvironment !== "production");
+    if (trafficMode === "production" && isTestEvent) continue;
+    if (trafficMode === "test" && !isTestEvent) continue;
+
     addMetric(eventByName, eventName, count);
     addMetric(eventByType, eventType, count);
     addMetric(eventByPage, page || "unknown", count);
@@ -1162,8 +1192,6 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         (eventDailyByName[eventName][date] || 0) + count;
     }
 
-    const custom = readEventCustomContext(row.event_context);
-    const sessionId = toSessionId(custom.session_id ?? custom.sessionId);
     const funnelStep = toMetricValue(custom.funnel_step ?? custom.funnelStep);
     const nextStep = toMetricValue(custom.next_step ?? custom.nextStep);
     const sourcePath = toMetricValue(custom.source_path ?? custom.sourcePath);
@@ -1264,6 +1292,35 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     addMetric(eventErrorsByType, errorType, count);
     addMetric(eventErrorsByClass, errorClass, count);
     addMetric(eventErrorsByField, fieldName, count);
+
+    if (eventName === "db_contact_form_submit_success") {
+      const firstTouchSource = toMetricValue(
+        custom.first_touch_source ?? custom.firstTouchSource
+      ) || "unknown";
+      const landingPath = normalizePathMetric(
+        custom.first_touch_landing_page ?? custom.firstTouchLandingPage
+      );
+      const firstTouchLandingPage = landingPath
+        ? landingPath === "/" || /\.[a-z0-9]+$/.test(landingPath)
+          ? landingPath
+          : `${landingPath}/`
+        : "unknown";
+      const campaign = toMetricValue(
+        custom.first_touch_utm_campaign ?? custom.firstTouchUtmCampaign
+      ) || "none";
+      addMetric(verifiedLeadsBySource, firstTouchSource, count);
+      addMetric(verifiedLeadsByLandingPage, firstTouchLandingPage, count);
+      addMetric(verifiedLeadsByUtmCampaign, campaign, count);
+      if (sessionId) verifiedLeadSessions.add(sessionId);
+    }
+    if (eventName === "db_cta_click") {
+      const ctaId = toMetricValue(custom.cta_id ?? custom.ctaId);
+      addMetric(
+        ctaClicksById,
+        /^[a-z0-9][a-z0-9_-]{0,79}$/.test(ctaId) ? ctaId : "unknown",
+        count
+      );
+    }
 
     const leadType = inferLeadType({
       eventName,
@@ -1626,6 +1683,23 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const referralSuccessSessionTotal = Object.values(
     referralSuccessSessionByAgency
   ).reduce((sum, sessions) => sum + sessions.size, 0);
+  const funnelEventNames = {
+    ctaClicks: "db_cta_click",
+    formViews: "db_contact_form_view",
+    formStarts: "db_contact_form_start",
+    validationErrors: "db_contact_form_validation_error",
+    submitErrors: "db_contact_form_submit_error",
+    verifiedLeads: "db_contact_form_submit_success"
+  };
+  const funnelEventCounts = Object.fromEntries(
+    Object.entries(funnelEventNames).map(([key, name]) => [key, eventByName[name] || 0])
+  );
+  const funnelObservedSessionCounts = Object.fromEntries(
+    Object.entries(funnelEventNames).map(([key, name]) => [
+      key,
+      eventSessionByName[name]?.size || 0
+    ])
+  );
 
   const payload: Record<string, unknown> = {
     site,
@@ -1687,6 +1761,26 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         .sort((a, b) => b.total - a.total),
       byTestTraffic: toBreakdown(eventByTestTraffic, "trafficType"),
       byAccessOutcome: toBreakdown(eventByAccessOutcome, "accessOutcome"),
+      verifiedLeads: {
+        total: eventByName.db_contact_form_submit_success || 0,
+        observedSessions: verifiedLeadSessions.size,
+        byFirstTouchSource: toBreakdown(verifiedLeadsBySource, "source"),
+        byFirstTouchLandingPage: Object.entries(verifiedLeadsByLandingPage)
+          .map(([path, leads]) => ({ path, leads }))
+          .sort((a, b) => b.leads - a.leads),
+        byFirstTouchUtmCampaign: toBreakdown(
+          verifiedLeadsByUtmCampaign,
+          "campaign"
+        )
+      },
+      ctaClicks: Object.entries(ctaClicksById)
+        .map(([ctaId, clicks]) => ({ ctaId, clicks }))
+        .sort((a, b) => b.clicks - a.clicks),
+      funnel: {
+        observedSessions: eventSessionTotal.size,
+        eventCounts: funnelEventCounts,
+        observedSessionCounts: funnelObservedSessionCounts
+      },
       leads: {
         total: leadTotal,
         estimatedValueTotal: leadEstimatedValueTotal,
@@ -2340,6 +2434,20 @@ const MAX_EVENT_CONTEXT_LENGTH = 1500;
 const MAX_CUSTOM_CONTEXT_KEYS = 28;
 const MAX_CUSTOM_CONTEXT_VALUE_LENGTH = 240;
 const CUSTOM_CONTEXT_PRIORITY_KEYS = [
+  "session_id",
+  "sessionId",
+  "event_id",
+  "eventId",
+  "is_test_traffic",
+  "source_env",
+  "first_touch_source",
+  "first_touch_landing_page",
+  "first_touch_utm_source",
+  "first_touch_utm_medium",
+  "first_touch_utm_campaign",
+  "cta_id",
+  "page_path",
+  "event_ts_client",
   "funnel_step",
   "next_step",
   "scroll_depth_pct",
@@ -2475,11 +2583,34 @@ const buildEventContext = ({
 
   const serialized = JSON.stringify(context);
   if (serialized.length <= MAX_EVENT_CONTEXT_LENGTH) return serialized;
-  return JSON.stringify({
-    ...context,
-    custom: {},
+  const compact = {
+    sourcePath: sourcePath.slice(0, 180),
+    platform,
+    referrerDomain: referrerDomain.slice(0, 120),
+    custom: {} as Record<string, string>,
     truncated: true
-  });
+  };
+  for (const key of [
+    "session_id", "is_test_traffic", "source_env", "first_touch_source",
+    "first_touch_landing_page", "cta_id", "first_touch_utm_source",
+    "first_touch_utm_medium", "first_touch_utm_campaign",
+    "page_path", "event_name", "event_type", "event_ts_client",
+    "funnel_step", "pathway", "error_type", "field_name", "http_status"
+  ]) {
+    if (!(key in customContext)) continue;
+    const limit = key === "first_touch_landing_page" || key === "page_path"
+      ? 180
+      : key === "session_id"
+        ? 128
+        : key === "cta_id"
+          ? 80
+          : 120;
+    compact.custom[key] = customContext[key].slice(0, limit);
+    if (JSON.stringify(compact).length > MAX_EVENT_CONTEXT_LENGTH) {
+      delete compact.custom[key];
+    }
+  }
+  return JSON.stringify(compact);
 };
 
 const classifyRefChannel = ({

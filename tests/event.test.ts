@@ -402,3 +402,46 @@ test("enforces optional event allowlists from env", async () => {
   expect(badResponse.status).toBe(400);
   expect(await badResponse.text()).toBe("Invalid page");
 });
+
+test("retains decision fields when a large event context is compacted", async () => {
+  const writes: any[] = [];
+  const customContext = {
+    session_id: "shared-session-123",
+    is_test_traffic: true,
+    source_env: "production",
+    first_touch_source: "utm:campaign",
+    first_touch_landing_page: "/models/digitals/",
+    first_touch_utm_campaign: "spring",
+    cta_id: "brisbane_digitals_hero_enquiry",
+    ...Object.fromEntries(
+      Array.from({ length: 28 }, (_, i) => [`extra_${i}`, "x".repeat(240)])
+    )
+  };
+  const response = await worker.fetch(
+    new Request("https://example.com/event", {
+      method: "POST",
+      headers: { Origin: "https://dave-blake.com", "Content-Type": "text/plain" },
+      body: JSON.stringify({
+        site: "dave-blake.com",
+        vendor: "dave-blake",
+        event_name: "db_cta_click",
+        event_type: "click",
+        page: "models-digitals",
+        session_id: "shared-session-123",
+        url: "https://dave-blake.com/models/digitals/",
+        custom_context: customContext
+      })
+    }),
+    makeEnv(writes)
+  );
+  expect(response.status).toBe(204);
+  const stored = writes.find(point => point.blobs[0] === "event").blobs[19];
+  const context = JSON.parse(stored).custom;
+  expect(stored.length).toBeLessThanOrEqual(1500);
+  expect(context.session_id).toBe("shared-session-123");
+  expect(context.is_test_traffic).toBe("true");
+  expect(context.first_touch_source).toBe("utm:campaign");
+  expect(context.first_touch_landing_page).toBe("/models/digitals/");
+  expect(context.first_touch_utm_campaign).toBe("spring");
+  expect(context.cta_id).toBe("brisbane_digitals_hero_enquiry");
+});
