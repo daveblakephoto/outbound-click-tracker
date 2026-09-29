@@ -1065,9 +1065,14 @@ test("keeps the live stats response fields and behaviour shape", async () => {
     "pathways", "errors", "transitions", "limitations"
   ].sort());
   expect(json.behaviour.measurement).toBe("observed_sessions_not_verified_leads");
-  expect(json.events).toHaveProperty("leads");
-  expect(json.events).toHaveProperty("referralAgencies");
-  expect(json.events).toHaveProperty("sessions");
-  expect(json.events).toHaveProperty("attribution");
+  const liveEventFields = ["total", "byName", "byType", "byPage", "byFunnelStep",
+    "byNextStep", "byPathway", "byTimeline", "bySourcePath", "byTargetDomain",
+    "byOutboundKind", "byScrollDepth", "byEngagedTimeSeconds", "byNavArea",
+    "bySourceHost", "bySourceEnvironment", "bySourceHostAndType",
+    "bySourceEnvironmentAndType", "byTestTraffic", "byAccessOutcome", "leads",
+    "referralAgencies", "errors", "daily", "dailyByName", "sessions", "attribution"];
+  for (const field of liveEventFields) expect(json.events).toHaveProperty(field);
   expect(json.events).toHaveProperty("verifiedLeads");
+  expect(json.events).toHaveProperty("ctaClicks");
+  expect(json.events).toHaveProperty("funnel");
 });
