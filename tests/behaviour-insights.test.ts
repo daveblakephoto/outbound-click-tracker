@@ -25,3 +25,29 @@ test('does not fabricate unsampled certainty when API fields are unavailable',()
 });
 
 test('recognises the historical audit representation label',()=>{expect(knownTestReason({representation:'Codex robustness audit'})).toBe('known_audit');});
+
+test('reads a complete historical camelCase journey without false missing timestamps',()=>{
+ const historical=(name:string,second:number,extra:Record<string,unknown>={}):BehaviourEvent=>({
+  name,page:'legacy-page',count:1,custom:{
+   sessionId:'historical-session-123',eventTsClient:`2026-09-10T00:00:${String(second).padStart(2,'0')}Z`,
+   pagePath:'/models/contact/',firstTouchLandingPage:'/models/digitals/',
+   firstTouchSource:'Search',pathway:'digitals-only',...extra
+  }
+ });
+ const result=buildBehaviourInsights([
+  historical('db_cta_click',0,{pagePath:'/models/digitals/',toPath:'/models/contact/',targetDomain:'dave-blake.com'}),
+  historical('db_contact_form_view',1),
+  historical('db_contact_form_start',2),
+  historical('db_contact_form_validation_error',3,{errorType:'validation',errorClass:'validation',fieldName:'email'}),
+  historical('db_contact_form_submit_attempt',4),
+  historical('db_contact_form_submit_success',5)
+ ]);
+ expect(result.funnel.map(step=>step.orderedSessions)).toEqual([1,1,1,1]);
+ expect(result.quality.missingTimestampSessions).toBe(0);
+ expect(result.quality.modelSuccessSessions).toBe(1);
+ expect(result.landingPages[0]).toMatchObject({key:'/models/digitals',successes:1});
+ expect(result.sources[0]).toMatchObject({key:'Search',successes:1});
+ expect(result.pathways[0]).toMatchObject({key:'digitals-only',successes:1});
+ expect(result.errors[0]).toMatchObject({type:'validation',field:'email',sessions:1,laterSuccessSessions:1});
+ expect(result.transitions[0]).toMatchObject({from:'/models/digitals',to:'/models/contact',sessions:1});
+});

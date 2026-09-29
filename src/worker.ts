@@ -723,10 +723,11 @@ const buildStatsResponseFromAnalyticsEngine = async ({
   const eventSessionDailyByName: Record<string, Record<string, Set<string>>> = {};
   const eventSessionTotal = new Set<string>();
   const verifiedLeadSessions = new Set<string>();
-  const verifiedLeadsBySource: Record<string, number> = {};
-  const verifiedLeadsByLandingPage: Record<string, number> = {};
-  const verifiedLeadsByUtmCampaign: Record<string, number> = {};
-  const ctaClicksById: Record<string, number> = {};
+  // Stored identity values may equal Object prototype property names.
+  const verifiedLeadsBySource: Record<string, number> = Object.create(null);
+  const verifiedLeadsByLandingPage: Record<string, number> = Object.create(null);
+  const verifiedLeadsByUtmCampaign: Record<string, number> = Object.create(null);
+  const ctaClicksById: Record<string, number> = Object.create(null);
   const sessionAttribution: Record<
     string,
     {
@@ -770,6 +771,10 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     target[key] = (target[key] || 0) + count;
   };
 
+  // Attribution labels and CTA IDs are identities, unlike folded metric labels.
+  const storedIdentity = (value: unknown) =>
+    value == null ? "" : String(value).trim();
+
   const addSessionMetric = (
     target: Record<string, Set<string>>,
     key: string,
@@ -805,12 +810,11 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     return candidate;
   };
 
-  const normalizePathMetric = (value: unknown) => {
-    const raw = String(value || "")
-      .trim()
-      .toLowerCase();
+  const normalizePathMetric = (value: unknown, preserveCase = false) => {
+    const text = String(value || "").trim();
+    const raw = preserveCase ? text : text.toLowerCase();
     if (!raw) return "";
-    let withoutOrigin = raw.replace(/^https?:\/\/[^/]+/, "");
+    let withoutOrigin = raw.replace(/^https?:\/\/[^/]+/i, "");
     withoutOrigin = withoutOrigin.split("?")[0].split("#")[0];
     if (!withoutOrigin) return "";
     if (!withoutOrigin.startsWith("/")) {
@@ -1286,18 +1290,19 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     addMetric(eventErrorsByField, fieldName, count);
 
     if (eventName === "db_contact_form_submit_success") {
-      const firstTouchSource = toMetricValue(
+      const firstTouchSource = storedIdentity(
         custom.first_touch_source ?? custom.firstTouchSource
       ) || "unknown";
       const landingPath = normalizePathMetric(
-        custom.first_touch_landing_page ?? custom.firstTouchLandingPage
+        custom.first_touch_landing_page ?? custom.firstTouchLandingPage,
+        true
       );
       const firstTouchLandingPage = landingPath
-        ? landingPath === "/" || /\.[a-z0-9]+$/.test(landingPath)
+        ? landingPath === "/" || /\.[a-z0-9]+$/i.test(landingPath)
           ? landingPath
           : `${landingPath}/`
         : "unknown";
-      const campaign = toMetricValue(
+      const campaign = storedIdentity(
         custom.first_touch_utm_campaign ?? custom.firstTouchUtmCampaign
       ) || "none";
       addMetric(verifiedLeadsBySource, firstTouchSource, count);
@@ -1306,7 +1311,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       if (sessionId) verifiedLeadSessions.add(sessionId);
     }
     if (eventName === "db_cta_click") {
-      const ctaId = toMetricValue(custom.cta_id ?? custom.ctaId);
+      const ctaId = storedIdentity(custom.cta_id ?? custom.ctaId);
       addMetric(
         ctaClicksById,
         /^[a-z0-9][a-z0-9_-]{0,79}$/.test(ctaId) ? ctaId : "unknown",
@@ -2426,6 +2431,40 @@ const classifyUserPlatform = (userAgent: string) => {
 const MAX_EVENT_CONTEXT_LENGTH = 1500;
 const MAX_CUSTOM_CONTEXT_KEYS = 28;
 const MAX_CUSTOM_CONTEXT_VALUE_LENGTH = 240;
+// These are encoded JSON value budgets for compacted contexts. Together with
+// every key and the envelope, all fields fit within 1,500 characters.
+const CRITICAL_CONTEXT_VALUE_BUDGETS: Record<string, number> = {
+  session_id: 128,
+  is_test_traffic: 5,
+  source_env: 16,
+  event_ts_client: 40,
+  page_path: 160,
+  first_touch_source: 84,
+  first_touch_landing_page: 160,
+  first_touch_utm_source: 64,
+  first_touch_utm_medium: 48,
+  first_touch_utm_campaign: 160,
+  cta_id: 80,
+  funnel_step: 24,
+  pathway: 24,
+  error_type: 48,
+  error_class: 24,
+  field_name: 48,
+  http_status: 4
+};
+
+const fitJsonString = (value: string, encodedBudget: number) => {
+  const characters = Array.from(value);
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const encodedLength = JSON.stringify(characters.slice(0, middle).join("")).length - 2;
+    if (encodedLength <= encodedBudget) low = middle;
+    else high = middle - 1;
+  }
+  return characters.slice(0, low).join("");
+};
 const CUSTOM_CONTEXT_ALIASES: Record<string, string> = {
   sessionId: "session_id", eventId: "event_id", isTestTraffic: "is_test_traffic",
   test_traffic: "is_test_traffic", sourceEnv: "source_env",
@@ -2569,30 +2608,26 @@ const buildEventContext = ({
   const serialized = JSON.stringify(context);
   if (serialized.length <= MAX_EVENT_CONTEXT_LENGTH) return serialized;
   const compact = {
-    sourcePath: sourcePath.slice(0, 180),
-    platform,
-    referrerDomain: referrerDomain.slice(0, 120),
     custom: {} as Record<string, string>,
     truncated: true
   };
-  for (const key of [
-    "session_id", "is_test_traffic", "source_env", "first_touch_source",
-    "first_touch_landing_page", "cta_id", "first_touch_utm_source",
-    "first_touch_utm_medium", "first_touch_utm_campaign",
-    "page_path", "event_name", "event_type", "event_ts_client",
-    "funnel_step", "pathway", "error_type", "field_name", "http_status"
-  ]) {
-    if (!(key in customContext)) continue;
-    const limit = key === "first_touch_landing_page" || key === "page_path"
-      ? 180
-      : key === "session_id"
-        ? 128
-        : key === "cta_id"
-          ? 80
-          : 120;
-    compact.custom[key] = customContext[key].slice(0, limit);
-    if (JSON.stringify(compact).length > MAX_EVENT_CONTEXT_LENGTH) {
-      delete compact.custom[key];
+  for (const [key, budget] of Object.entries(CRITICAL_CONTEXT_VALUE_BUDGETS)) {
+    if (Object.hasOwn(customContext, key)) {
+      compact.custom[key] = fitJsonString(customContext[key], budget);
+    }
+  }
+  const addOptional = (key: string, value: string, budget: number, target: Record<string, string>) => {
+    target[key] = fitJsonString(value, budget);
+    if (JSON.stringify(compact).length > MAX_EVENT_CONTEXT_LENGTH) delete target[key];
+  };
+  // Optional envelope and context use only the space left after critical fields.
+  const optionalEnvelope: Record<string, string> = compact as Record<string, string>;
+  addOptional("sourcePath", sourcePath, 180, optionalEnvelope);
+  addOptional("platform", platform, 40, optionalEnvelope);
+  addOptional("referrerDomain", referrerDomain, 120, optionalEnvelope);
+  for (const key of ["event_name", "event_type", "target_domain", "to_path", "target_path"]) {
+    if (Object.hasOwn(customContext, key)) {
+      addOptional(key, customContext[key], 120, compact.custom);
     }
   }
   return JSON.stringify(compact);

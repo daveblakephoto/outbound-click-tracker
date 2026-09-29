@@ -4,6 +4,23 @@ const text = (v: unknown) => typeof v === 'string' ? v.trim() : '';
 const path = (v: unknown) => { const s=text(v); return s.startsWith('/') ? s.split(/[?#]/)[0].replace(/\/$/, '') || '/' : ''; };
 const time = (v: unknown) => { const n=Date.parse(text(v)); return Number.isFinite(n)?n:null; };
 const truth = (v: unknown) => v===true || v==='true' || v===1 || v==='1';
+const aliases = {
+ session: ['session_id', 'sessionId'],
+ timestamp: ['event_ts_client', 'eventTsClient', 'ts_iso'],
+ page: ['page_path', 'pagePath', 'source_path', 'sourcePath'],
+ landing: ['first_touch_landing_page', 'firstTouchLandingPage', 'landing_page', 'landingPage'],
+ source: ['first_touch_source', 'firstTouchSource'],
+ errorType: ['error_type', 'errorType'],
+ errorClass: ['error_class', 'errorClass'],
+ field: ['field_name', 'fieldName'],
+ destination: ['to_path', 'toPath', 'target_path', 'targetPath'],
+ domain: ['target_domain', 'targetDomain']
+} as const;
+const read = (c: Record<string, unknown>, keys: readonly string[]) => {
+ for(const key of keys) if(c[key] !== undefined && c[key] !== null) return c[key];
+ return undefined;
+};
+const eventTime = (e: BehaviourEvent) => time(read(e.custom, aliases.timestamp));
 export function knownTestReason(c: Record<string, unknown>): string {
   if(truth(c.is_test_traffic ?? c.isTestTraffic ?? c.test_traffic)) return 'explicit_test';
   // Narrow historical marker used by our own audit, not a guess based on visitor identity.
@@ -17,7 +34,7 @@ export function buildBehaviourInsights(events: BehaviourEvent[], excludedTestEst
   estimatedEvents+=e.count;
   if(e.sampledRows===undefined || e.maxSampleInterval===undefined) samplingKnown=false;
   sampledRows+=e.sampledRows||0;sampled ||= (e.maxSampleInterval||1)>1;
-  const id=text(e.custom.session_id ?? e.custom.sessionId);
+  const id=text(read(e.custom, aliases.session));
   if(!id){missingSessionEstimate+=e.count;continue;}
   if(!sessions.has(id))sessions.set(id,{events:[]});sessions.get(id)!.events.push(e);
  }
@@ -27,19 +44,19 @@ export function buildBehaviourInsights(events: BehaviourEvent[], excludedTestEst
  let modelSuccessSessions=0, successWithoutAttempt=0,unknownLandingSessions=0,unknownSourceSessions=0, missingTimestampSessions=0;
  const summary=(map:Map<string,any>,key:string)=>{if(!map.has(key))map.set(key,{key,sessions:0,formViews:0,formStarts:0,attempts:0,successes:0});return map.get(key);};
  for(const {events:es} of sessions.values()){
-  const ordered=[...es].sort((a,b)=>(time(a.custom.event_ts_client??a.custom.ts_iso)??Infinity)-(time(b.custom.event_ts_client??b.custom.ts_iso)??Infinity));
-  const modelEvents=ordered.filter(e=>path(e.custom.page_path).startsWith('/models/contact') || e.page==='models-contact');
+  const ordered=[...es].sort((a,b)=>(eventTime(a)??Infinity)-(eventTime(b)??Infinity));
+  const modelEvents=ordered.filter(e=>path(read(e.custom, aliases.page)).startsWith('/models/contact') || e.page==='models-contact');
   const sets=names.map(name=>modelEvents.filter(e=>e.name===name));const present=sets.map(a=>a.length>0);
   present.forEach((v,i)=>{if(v)observed[i]++;});
   if(present[3]){modelSuccessSessions++;if(!present[2])successWithoutAttempt++;}
   let previous=-Infinity;
   for(let i=0;i<sets.length;i++){
-   const ts=sets[i].map(e=>time(e.custom.event_ts_client??e.custom.ts_iso)).filter((v):v is number=>v!==null && v>=previous).sort((a,b)=>a-b)[0];
+   const ts=sets[i].map(eventTime).filter((v):v is number=>v!==null && v>=previous).sort((a,b)=>a-b)[0];
    if(ts===undefined)break;linked[i]++;previous=ts;
   }
-  if(modelEvents.some(e=>names.includes(e.name)&&time(e.custom.event_ts_client??e.custom.ts_iso)===null))missingTimestampSessions++;
-  const landing=ordered.map(e=>path(e.custom.first_touch_landing_page??e.custom.firstTouchLandingPage??e.custom.landing_page)).find(Boolean)||'unknown';
-  const source=ordered.map(e=>text(e.custom.first_touch_source??e.custom.firstTouchSource)).find(Boolean)||'unknown';
+  if(modelEvents.some(e=>names.includes(e.name)&&eventTime(e)===null))missingTimestampSessions++;
+  const landing=ordered.map(e=>path(read(e.custom, aliases.landing))).find(Boolean)||'unknown';
+  const source=ordered.map(e=>text(read(e.custom, aliases.source))).find(Boolean)||'unknown';
   if(landing==='unknown')unknownLandingSessions++;if(source==='unknown')unknownSourceSessions++;
   for(const row of [summary(landings,landing),summary(sources,source)]){row.sessions++;['formViews','formStarts','attempts','successes'].forEach((k,i)=>{if(present[i])row[k]++;});}
   // Attribute the form to the last nonempty pathway observed; don't count one session in several pathways.
@@ -48,15 +65,15 @@ export function buildBehaviourInsights(events: BehaviourEvent[], excludedTestEst
   const seenErrors=new Set<string>(),seenLinks=new Set<string>();
   for(const e of modelEvents){
    if(!/error$/.test(e.name))continue;
-   const type=text(e.custom.error_type)||'unknown',field=text(e.custom.field_name)||'';const key=type+'|'+field;
+   const type=text(read(e.custom, aliases.errorType))||text(read(e.custom, aliases.errorClass))||'unknown',field=text(read(e.custom, aliases.field))||'';const key=type+'|'+field;
    if(seenErrors.has(key))continue;seenErrors.add(key);
    if(!errors.has(key))errors.set(key,{type,field,sessions:0,laterSuccessSessions:0});const row=errors.get(key);row.sessions++;
-   const errorTime=time(e.custom.event_ts_client??e.custom.ts_iso);
-   if(errorTime!==null&&sets[3].some(s=>(time(s.custom.event_ts_client??s.custom.ts_iso)??-Infinity)>errorTime))row.laterSuccessSessions++;
+   const errorTime=eventTime(e);
+   if(errorTime!==null&&sets[3].some(s=>(eventTime(s)??-Infinity)>errorTime))row.laterSuccessSessions++;
   }
   for(const e of ordered){
    if(!e.name.includes('click'))continue;
-   const from=path(e.custom.page_path),to=path(e.custom.to_path??e.custom.target_path);const domain=text(e.custom.target_domain);
+   const from=path(read(e.custom, aliases.page)),to=path(read(e.custom, aliases.destination));const domain=text(read(e.custom, aliases.domain));
    if(!from||(!to&&!domain))continue;
    const destination=domain&&domain!=='dave-blake.com' ? domain+(to||'') : to;
    const key=from+' → '+destination;if(seenLinks.has(key))continue;seenLinks.add(key);

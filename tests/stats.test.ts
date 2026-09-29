@@ -1050,6 +1050,49 @@ test("legacy empty environment rows stay out of production reporting", async () 
   expect(production.behaviour.quality.excludedTestEstimate).toBe(2);
 });
 
+test("keeps case and characters after position 96 in stored lead attribution", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const campaigns = ["Spring", "spring", `${"C".repeat(96)}A`, `${"C".repeat(96)}B`, "__proto__", "constructor"];
+  const rows = campaigns.map((campaign, index) => ({
+    page: "models-contact", event_type: "submit",
+    event_name: "db_contact_form_submit_success", date: today,
+    event_environment: "production", count: 1,
+    event_context: JSON.stringify({ custom: {
+      session_id: `campaign-session-${index}`,
+      first_touch_source: index % 2 ? "Google" : "google",
+      first_touch_landing_page: index % 2 ? "/Campaign/" : "/campaign/",
+      first_touch_utm_campaign: campaign
+    } })
+  }));
+  rows.push({
+    page: "models-digitals", event_type: "click", event_name: "db_cta_click",
+    date: today, event_environment: "production", count: 1,
+    event_context: JSON.stringify({ custom: { session_id: "cta-constructor", cta_id: "constructor" } })
+  });
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => ({
+    ok: true,
+    json: async () => ({ data: String(init?.body).includes("blob1 = 'event'") ? rows : [] })
+  } as any));
+  const response = await worker.fetch(new Request(
+    "https://example.com/api/stats?site=dave-blake.com&range=7d&traffic=production",
+    { headers: { Authorization: "Bearer test-secret" } }
+  ), { ...makeEnv(), SITE_ALLOWLIST: "startmyloveengine,dave-blake.com" });
+  const json = await response.json() as any;
+  expect(response.status).toBe(200);
+  expect(json.events.verifiedLeads).toMatchObject({ total: 6, observedSessions: 6 });
+  expect(json.events.verifiedLeads.byFirstTouchUtmCampaign).toHaveLength(6);
+  for (const campaign of campaigns) {
+    expect(json.events.verifiedLeads.byFirstTouchUtmCampaign).toContainEqual({ campaign, count: 1 });
+  }
+  expect(json.events.verifiedLeads.byFirstTouchSource).toEqual([
+    { source: "google", count: 3 }, { source: "Google", count: 3 }
+  ]);
+  expect(json.events.verifiedLeads.byFirstTouchLandingPage).toEqual([
+    { path: "/campaign/", leads: 3 }, { path: "/Campaign/", leads: 3 }
+  ]);
+  expect(json.events.ctaClicks).toContainEqual({ ctaId: "constructor", clicks: 1 });
+});
+
 test("keeps the live stats response fields and behaviour shape", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValue({
     ok: true, json: async () => ({ data: [] })
