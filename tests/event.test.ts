@@ -445,3 +445,38 @@ test("retains decision fields when a large event context is compacted", async ()
   expect(context.first_touch_utm_campaign).toBe("spring");
   expect(context.cta_id).toBe("brisbane_digitals_hero_enquiry");
 });
+
+test("canonicalizes camelCase decision fields before both context limits", async () => {
+  const writes: any[] = [];
+  const customContext = {
+    ...Object.fromEntries(Array.from({ length: 35 }, (_, i) => [`extra_${i}`, "x".repeat(240)])),
+    sessionId: "camel-session-123",
+    isTestTraffic: true,
+    sourceEnv: "production",
+    firstTouchSource: "utm:campaign",
+    firstTouchLandingPage: "/models/digitals/",
+    firstTouchUtmCampaign: "camel-spring",
+    ctaId: "brisbane_digitals_hero_enquiry"
+  };
+  const response = await worker.fetch(
+    new Request("https://example.com/event", {
+      method: "POST",
+      headers: { Origin: "https://dave-blake.com", "Content-Type": "text/plain" },
+      body: JSON.stringify({
+        site: "dave-blake.com", vendor: "dave-blake", event_name: "db_cta_click",
+        event_type: "click", page: "models-digitals", session_id: "camel-session-123",
+        url: "https://dave-blake.com/models/digitals/", custom_context: customContext
+      })
+    }), makeEnv(writes)
+  );
+  expect(response.status).toBe(204);
+  const stored = writes.find(point => point.blobs[0] === "event").blobs[19];
+  const context = JSON.parse(stored).custom;
+  expect(stored.length).toBeLessThanOrEqual(1500);
+  expect(context).toMatchObject({
+    session_id: "camel-session-123", is_test_traffic: "true", source_env: "production",
+    first_touch_source: "utm:campaign", first_touch_landing_page: "/models/digitals/",
+    first_touch_utm_campaign: "camel-spring", cta_id: "brisbane_digitals_hero_enquiry"
+  });
+  expect(context.firstTouchSource).toBeUndefined();
+});

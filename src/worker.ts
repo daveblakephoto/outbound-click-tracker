@@ -1,3 +1,4 @@
+import { buildBehaviourInsights, knownTestReason, type BehaviourEvent } from "./behaviour-insights";
 // Optional hardening features:
 // - CLICK_SIGNING_SECRET enables HMAC-signed click URLs
 // - RATE_LIMIT_PER_MINUTE enables per-IP rate limiting
@@ -642,7 +643,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       ),
       timedQuery(
         "events",
-        `SELECT blob3 AS vendor, blob4 AS page, blob7 AS event_type, blob8 AS event_name, blob11 AS date, blob17 AS event_environment, blob20 AS event_context, SUM(_sample_interval) AS count FROM ${datasetIdent} ${eventWhere} AND blob1 = ${sqlString(
+        `SELECT blob3 AS vendor, blob4 AS page, blob7 AS event_type, blob8 AS event_name, blob11 AS date, blob17 AS event_environment, blob20 AS event_context, COUNT() AS sampled_rows, MAX(_sample_interval) AS max_sample_interval, SUM(_sample_interval) AS count FROM ${datasetIdent} ${eventWhere} AND blob1 = ${sqlString(
           ANALYTICS_EVENT_TYPES.EVENT
         )} GROUP BY vendor, page, event_type, event_name, date, event_environment, event_context`
       ),
@@ -1002,13 +1003,14 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     }
   };
 
-  // Test mode on the production hostname keeps source_env=production. Classify
-  // event rows from the stored flag before aggregating, including mixed sessions.
+  // Classify the full observed session before selecting a traffic slice.
+  // blob17 is authoritative: legacy empty environments are non-production.
   const knownTestSessions = new Set<string>();
   for (const row of eventRows) {
     const custom = readEventCustomContext(row.event_context);
     const sessionId = toSessionId(custom.session_id ?? custom.sessionId);
-    if (sessionId && parseBooleanLike(custom.is_test_traffic ?? custom.isTestTraffic) === true) {
+    const environment = toMetricValue(row.event_environment);
+    if (sessionId && (knownTestReason(custom) || environment !== "production")) {
       knownTestSessions.add(sessionId);
     }
   }
@@ -1158,6 +1160,8 @@ const buildStatsResponseFromAnalyticsEngine = async ({
       (sourceEnvironmentByType[sourceEnvironment][recordType] || 0) + count;
   }
 
+  const behaviourEvents: BehaviourEvent[] = [];
+  let excludedTestEstimate = 0;
   for (const row of eventRows) {
     const eventName = toMetricValue(row.event_name);
     const eventType = toMetricValue(row.event_type);
@@ -1168,16 +1172,19 @@ const buildStatsResponseFromAnalyticsEngine = async ({
 
     const custom = readEventCustomContext(row.event_context);
     const sessionId = toSessionId(custom.session_id ?? custom.sessionId);
-    const eventEnvironment = toMetricValue(
-      row.event_environment ?? custom.source_env ?? custom.environment
-    );
-    const flaggedTest = parseBooleanLike(
-      custom.is_test_traffic ?? custom.isTestTraffic ?? custom.test_traffic
-    ) === true;
-    const isTestEvent = flaggedTest || knownTestSessions.has(sessionId) ||
-      (eventEnvironment !== "" && eventEnvironment !== "production");
-    if (trafficMode === "production" && isTestEvent) continue;
+    const eventEnvironment = toMetricValue(row.event_environment);
+    const isTestEvent = Boolean(knownTestReason(custom)) || knownTestSessions.has(sessionId) ||
+      eventEnvironment !== "production";
+    if (trafficMode === "production" && isTestEvent) {
+      excludedTestEstimate += count;
+      continue;
+    }
     if (trafficMode === "test" && !isTestEvent) continue;
+    behaviourEvents.push({
+      name: eventName, page, count, custom,
+      sampledRows: row.sampled_rows == null ? undefined : toCount(row.sampled_rows),
+      maxSampleInterval: row.max_sample_interval == null ? undefined : Number(row.max_sample_interval)
+    });
 
     addMetric(eventByName, eventName, count);
     addMetric(eventByType, eventType, count);
@@ -1251,22 +1258,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     const accessOutcome = toMetricValue(custom.access_outcome ?? custom.accessOutcome);
     const errorType = toMetricValue(custom.error_type ?? custom.errorType);
     const fieldName = toMetricValue(custom.field_name ?? custom.fieldName);
-    const sourceEnvironment = toMetricValue(
-      custom.source_env ?? custom.sourceEnv ?? custom.environment
-    );
-    const explicitIsTestTraffic =
-      parseBooleanLike(custom.is_test_traffic ?? custom.isTestTraffic) ??
-      parseBooleanLike(custom.test_traffic);
-    const testTrafficKey =
-      explicitIsTestTraffic === true
-        ? "test"
-        : explicitIsTestTraffic === false
-          ? "production"
-          : sourceEnvironment && sourceEnvironment !== "production"
-            ? "test"
-            : sourceEnvironment === "production"
-              ? "production"
-              : "unknown";
+    const testTrafficKey = isTestEvent ? "test" : "production";
     const httpStatusRaw = Number(
       custom.http_status ?? custom.httpStatus ?? custom.status_code ?? 0
     );
@@ -1716,6 +1708,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     dailyViews: dailyViewTotals,
     dailyUniqueViews: dailyUniqueViewTotals,
     tierViews,
+    behaviour: buildBehaviourInsights(behaviourEvents, excludedTestEstimate),
     events: {
       total: Object.values(eventByName).reduce((sum, value) => sum + value, 0),
       byName: toBreakdown(eventByName, "eventName"),
@@ -2433,11 +2426,29 @@ const classifyUserPlatform = (userAgent: string) => {
 const MAX_EVENT_CONTEXT_LENGTH = 1500;
 const MAX_CUSTOM_CONTEXT_KEYS = 28;
 const MAX_CUSTOM_CONTEXT_VALUE_LENGTH = 240;
+const CUSTOM_CONTEXT_ALIASES: Record<string, string> = {
+  sessionId: "session_id", eventId: "event_id", isTestTraffic: "is_test_traffic",
+  test_traffic: "is_test_traffic", sourceEnv: "source_env",
+  firstTouchSource: "first_touch_source",
+  firstTouchLandingPage: "first_touch_landing_page",
+  firstTouchUtmSource: "first_touch_utm_source",
+  firstTouchUtmMedium: "first_touch_utm_medium",
+  firstTouchUtmCampaign: "first_touch_utm_campaign",
+  ctaId: "cta_id", pagePath: "page_path", eventTsClient: "event_ts_client",
+  funnelStep: "funnel_step", nextStep: "next_step",
+  scrollDepthPct: "scroll_depth_pct", maxScrollPct: "max_scroll_pct",
+  engagedTimeSeconds: "engaged_time_seconds", navArea: "nav_area",
+  fieldName: "field_name", errorType: "error_type", errorClass: "error_class",
+  httpStatus: "http_status", sourcePath: "source_path",
+  referralSource: "referral_source", agencySlug: "agency_slug",
+  targetPath: "target_path", toPath: "to_path", targetDomain: "target_domain",
+  outboundKind: "outbound_kind", ctaPosition: "cta_position",
+  ctaText: "cta_text", accessOutcome: "access_outcome",
+  lastTouchSource: "last_touch_source"
+};
 const CUSTOM_CONTEXT_PRIORITY_KEYS = [
   "session_id",
-  "sessionId",
   "event_id",
-  "eventId",
   "is_test_traffic",
   "source_env",
   "first_touch_source",
@@ -2451,62 +2462,29 @@ const CUSTOM_CONTEXT_PRIORITY_KEYS = [
   "funnel_step",
   "next_step",
   "scroll_depth_pct",
-  "scrollDepthPct",
   "max_scroll_pct",
-  "maxScrollPct",
   "engaged_time_seconds",
-  "engagedTimeSeconds",
   "nav_area",
-  "navArea",
   "pathway",
   "timeline",
   "field_name",
-  "fieldName",
   "error_type",
-  "errorType",
   "error_class",
-  "errorClass",
   "http_status",
-  "httpStatus",
-  "session_id",
-  "sessionId",
-  "event_id",
-  "eventId",
-  "event_ts_client",
-  "eventTsClient",
   "source_path",
-  "sourcePath",
   "referral_source",
-  "referralSource",
   "representation",
   "vendor",
   "agency_slug",
-  "agencySlug",
   "target_path",
-  "targetPath",
   "to_path",
-  "toPath",
   "target_domain",
-  "targetDomain",
   "outbound_kind",
-  "outboundKind",
-  "cta_id",
-  "ctaId",
   "cta_position",
-  "ctaPosition",
   "cta_text",
-  "ctaText",
   "access_outcome",
-  "accessOutcome",
-  "source_env",
-  "sourceEnv",
   "environment",
-  "is_test_traffic",
-  "isTestTraffic",
-  "first_touch_source",
-  "firstTouchSource",
   "last_touch_source",
-  "lastTouchSource",
   "landing_page",
   "utm_source",
   "utm_medium",
@@ -2523,7 +2501,14 @@ const sanitizeCustomContext = (value: unknown) => {
   const entries = Object.entries(value as Record<string, unknown>).filter(([key]) =>
     /^[a-zA-Z0-9_.-]{1,40}$/.test(key)
   );
+  // Canonical names win if both spellings are supplied. Do this before both
+  // the 28-key selection and the later 1500-character compaction.
   const byKey = new Map(entries);
+  for (const [alias, canonical] of Object.entries(CUSTOM_CONTEXT_ALIASES)) {
+    if (!byKey.has(alias)) continue;
+    if (!byKey.has(canonical)) byKey.set(canonical, byKey.get(alias));
+    byKey.delete(alias);
+  }
   const selected: Array<[string, string]> = [];
   const selectedKeys = new Set<string>();
   const toStringValue = (item: unknown) => {
@@ -2551,7 +2536,7 @@ const sanitizeCustomContext = (value: unknown) => {
   }
 
   if (selected.length < MAX_CUSTOM_CONTEXT_KEYS) {
-    for (const [key, item] of entries) {
+    for (const [key, item] of byKey) {
       tryAdd(key, item);
       if (selected.length >= MAX_CUSTOM_CONTEXT_KEYS) break;
     }
