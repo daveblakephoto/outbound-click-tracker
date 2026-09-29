@@ -985,8 +985,9 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     return "";
   };
 
-  const readEventCustomContext = (rawContext: unknown) => {
-    if (typeof rawContext !== "string" || !rawContext.trim()) return {};
+  const readEventContext = (rawContext: unknown) => {
+    const empty = { custom: {} as Record<string, unknown>, sourcePath: "" };
+    if (typeof rawContext !== "string" || !rawContext.trim()) return empty;
     try {
       const parsed = JSON.parse(rawContext);
       if (
@@ -995,17 +996,23 @@ const buildStatsResponseFromAnalyticsEngine = async ({
         Array.isArray(parsed) ||
         !("custom" in parsed)
       ) {
-        return {};
+        return empty;
       }
       const custom = (parsed as any).custom;
       if (!custom || typeof custom !== "object" || Array.isArray(custom)) {
-        return {};
+        return empty;
       }
-      return custom as Record<string, unknown>;
+      return {
+        custom: custom as Record<string, unknown>,
+        sourcePath: typeof (parsed as any).sourcePath === "string"
+          ? (parsed as any).sourcePath
+          : ""
+      };
     } catch {
-      return {};
+      return empty;
     }
   };
+  const readEventCustomContext = (rawContext: unknown) => readEventContext(rawContext).custom;
 
   // Classify the full observed session before selecting a traffic slice.
   // blob17 is authoritative: legacy empty environments are non-production.
@@ -1174,7 +1181,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     const count = toCount(row.count);
     if (!eventName || !eventType || !count) continue;
 
-    const custom = readEventCustomContext(row.event_context);
+    const { custom, sourcePath: eventSourcePath } = readEventContext(row.event_context);
     const sessionId = toSessionId(custom.session_id ?? custom.sessionId);
     const eventEnvironment = toMetricValue(row.event_environment);
     const isTestEvent = Boolean(knownTestReason(custom)) || knownTestSessions.has(sessionId) ||
@@ -1185,7 +1192,7 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     }
     if (trafficMode === "test" && !isTestEvent) continue;
     behaviourEvents.push({
-      name: eventName, page, count, custom,
+      name: eventName, page, count, custom, sourcePath: eventSourcePath,
       sampledRows: row.sampled_rows == null ? undefined : toCount(row.sampled_rows),
       maxSampleInterval: row.max_sample_interval == null ? undefined : Number(row.max_sample_interval)
     });
@@ -1713,7 +1720,11 @@ const buildStatsResponseFromAnalyticsEngine = async ({
     dailyViews: dailyViewTotals,
     dailyUniqueViews: dailyUniqueViewTotals,
     tierViews,
-    behaviour: buildBehaviourInsights(behaviourEvents, excludedTestEstimate),
+    behaviour: buildBehaviourInsights(
+      behaviourEvents,
+      excludedTestEstimate,
+      Array.from(INTERNAL_REFERRER_DOMAINS)
+    ),
     events: {
       total: Object.values(eventByName).reduce((sum, value) => sum + value, 0),
       byName: toBreakdown(eventByName, "eventName"),

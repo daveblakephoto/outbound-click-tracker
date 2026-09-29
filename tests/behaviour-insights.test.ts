@@ -41,7 +41,7 @@ test('reads a complete historical camelCase journey without false missing timest
   historical('db_contact_form_validation_error',3,{errorType:'validation',errorClass:'validation',fieldName:'email'}),
   historical('db_contact_form_submit_attempt',4),
   historical('db_contact_form_submit_success',5)
- ]);
+ ],0,['dave-blake.com']);
  expect(result.funnel.map(step=>step.orderedSessions)).toEqual([1,1,1,1]);
  expect(result.quality.missingTimestampSessions).toBe(0);
  expect(result.quality.modelSuccessSessions).toBe(1);

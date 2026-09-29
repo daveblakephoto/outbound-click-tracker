@@ -1093,6 +1093,37 @@ test("keeps case and characters after position 96 in stored lead attribution", a
   expect(json.events.ctaClicks).toContainEqual({ ctaId: "constructor", clicks: 1 });
 });
 
+test("uses the stored envelope path and configured internal hosts for behaviour transitions", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = [
+    { target_domain: "www.dave-blake.com", to_path: "/models/contact/" },
+    { target_domain: "main.dave-blake.com", to_path: "/models/contact/" },
+    { target_domain: "startmyloveengine.com", to_path: "/models/contact/" },
+    { target_domain: "agency.example", to_path: "/booking/" }
+  ].map(custom => ({
+    page: "models-digitals", event_type: "click", event_name: "db_cta_click",
+    date: today, event_environment: "production", count: 1,
+    event_context: JSON.stringify({
+      sourcePath: "/models/digitals/",
+      custom: { session_id: "transition-session-123", ...custom }
+    })
+  }));
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => ({
+    ok: true,
+    json: async () => ({ data: String(init?.body).includes("blob1 = 'event'") ? rows : [] })
+  } as any));
+  const response = await worker.fetch(new Request(
+    "https://example.com/api/stats?site=dave-blake.com&range=7d&traffic=production",
+    { headers: { Authorization: "Bearer test-secret" } }
+  ), { ...makeEnv(), SITE_ALLOWLIST: "startmyloveengine,dave-blake.com" });
+  const json = await response.json() as any;
+  expect(response.status).toBe(200);
+  expect(json.behaviour.transitions).toEqual([
+    { from: "/models/digitals", to: "/models/contact", sessions: 1 },
+    { from: "/models/digitals", to: "agency.example/booking", sessions: 1 }
+  ]);
+});
+
 test("keeps the live stats response fields and behaviour shape", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValue({
     ok: true, json: async () => ({ data: [] })

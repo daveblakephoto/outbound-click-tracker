@@ -1,5 +1,5 @@
 /** Session observations from Analytics Engine. Never represent these as exact leads. */
-export type BehaviourEvent = { name: string; page: string; count: number; sampledRows?: number; maxSampleInterval?: number; custom: Record<string, unknown> };
+export type BehaviourEvent = { name: string; page: string; count: number; sourcePath?: string; sampledRows?: number; maxSampleInterval?: number; custom: Record<string, unknown> };
 const text = (v: unknown) => typeof v === 'string' ? v.trim() : '';
 const path = (v: unknown) => { const s=text(v); return s.startsWith('/') ? s.split(/[?#]/)[0].replace(/\/$/, '') || '/' : ''; };
 const time = (v: unknown) => { const n=Date.parse(text(v)); return Number.isFinite(n)?n:null; };
@@ -21,13 +21,14 @@ const read = (c: Record<string, unknown>, keys: readonly string[]) => {
  return undefined;
 };
 const eventTime = (e: BehaviourEvent) => time(read(e.custom, aliases.timestamp));
+const eventPagePath = (e: BehaviourEvent) => path(read(e.custom, aliases.page)) || path(e.sourcePath);
 export function knownTestReason(c: Record<string, unknown>): string {
   if(truth(c.is_test_traffic ?? c.isTestTraffic ?? c.test_traffic)) return 'explicit_test';
   // Narrow historical marker used by our own audit, not a guess based on visitor identity.
   if([c.referral_source,c.referralSource,c.agency_slug,c.agencySlug,c.representation,c.represented_by,c.representedBy].some(v=>text(v).toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'')==='codex_robustness_audit')) return 'known_audit';
   return '';
 }
-export function buildBehaviourInsights(events: BehaviourEvent[], excludedTestEstimate=0) {
+export function buildBehaviourInsights(events: BehaviourEvent[], excludedTestEstimate=0, internalDomains: readonly string[] = []) {
  const sessions=new Map<string, {events:BehaviourEvent[]}>();
  let missingSessionEstimate=0, sampled=false, samplingKnown=true, sampledRows=0, estimatedEvents=0;
  for(const e of events){
@@ -45,7 +46,7 @@ export function buildBehaviourInsights(events: BehaviourEvent[], excludedTestEst
  const summary=(map:Map<string,any>,key:string)=>{if(!map.has(key))map.set(key,{key,sessions:0,formViews:0,formStarts:0,attempts:0,successes:0});return map.get(key);};
  for(const {events:es} of sessions.values()){
   const ordered=[...es].sort((a,b)=>(eventTime(a)??Infinity)-(eventTime(b)??Infinity));
-  const modelEvents=ordered.filter(e=>path(read(e.custom, aliases.page)).startsWith('/models/contact') || e.page==='models-contact');
+  const modelEvents=ordered.filter(e=>eventPagePath(e).startsWith('/models/contact') || e.page==='models-contact');
   const sets=names.map(name=>modelEvents.filter(e=>e.name===name));const present=sets.map(a=>a.length>0);
   present.forEach((v,i)=>{if(v)observed[i]++;});
   if(present[3]){modelSuccessSessions++;if(!present[2])successWithoutAttempt++;}
@@ -73,9 +74,12 @@ export function buildBehaviourInsights(events: BehaviourEvent[], excludedTestEst
   }
   for(const e of ordered){
    if(!e.name.includes('click'))continue;
-   const from=path(read(e.custom, aliases.page)),to=path(read(e.custom, aliases.destination));const domain=text(read(e.custom, aliases.domain));
+   const from=eventPagePath(e),to=path(read(e.custom, aliases.destination));const domain=text(read(e.custom, aliases.domain));
    if(!from||(!to&&!domain))continue;
-   const destination=domain&&domain!=='dave-blake.com' ? domain+(to||'') : to;
+   const host=domain.toLowerCase().replace(/\.$/,'');
+   const internal=internalDomains.some(base=>host===base || host.endsWith('.'+base));
+   if(internal&&!to)continue;
+   const destination=domain&&!internal ? domain+(to||'') : to;
    const key=from+' → '+destination;if(seenLinks.has(key))continue;seenLinks.add(key);
    if(!transitions.has(key))transitions.set(key,{from,to:destination,sessions:0});transitions.get(key).sessions++;
   }
